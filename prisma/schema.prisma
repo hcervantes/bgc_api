@@ -1,0 +1,178 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// Roles are UPPERCASE everywhere: JWT claims, SessionRole, guards, decorators.
+// One convention, zero mapping code.
+enum Role {
+  STAFF
+  ADMIN
+  CLIENT_ADMIN
+  CLIENT_USER
+}
+
+enum ClientStatus {
+  active
+  suspended
+  cancelled
+}
+
+enum DocumentType {
+  w2
+  other1099
+  prior_return
+  id_doc
+  misc
+}
+
+enum DocumentStatus {
+  pending_upload
+  uploaded
+  scanned
+  rejected
+}
+
+enum TaxReturnType {
+  individual
+  business
+  amended
+}
+
+enum JobState {
+  queued
+  site_created
+  app_installed
+  company_created
+  token_stored
+  done
+  failed
+}
+
+// Portal users are mirrored here ONLY when a FK needs them (uploadedBy,
+// preparedBy). Their ids equal the portal user ids (= JWT sub).
+model User {
+  id           String       @id
+  email        String       @unique
+  name         String
+  role         Role
+  memberships  ClientUser[]
+  documents    Document[]
+  taxReturns   TaxReturn[]
+  createdAt    DateTime     @default(now())
+}
+
+// Tenant registry. SLUG is the canonical public identifier used in URLs
+// and JWT claims; id (uuid) is the internal key.
+model Client {
+  id                 String            @id @default(uuid())
+  slug               String            @unique
+  name               String
+  legalName          String
+  ein                String?
+  email              String
+  status             ClientStatus      @default(active)
+  bookkeepingEnabled Boolean           @default(false)
+  createdAt          DateTime          @default(now())
+  updatedAt          DateTime          @updatedAt
+  users              ClientUser[]
+  documents          Document[]
+  taxReturns         TaxReturn[]
+  erpSite            ErpNextSite?
+  provisioningJobs   ProvisioningJob[]
+  auditLogs          AuditLog[]
+}
+
+model ClientUser {
+  id               String  @id @default(uuid())
+  clientId         String
+  client           Client  @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  userId           String
+  user             User    @relation(fields: [userId], references: [id])
+  isPrimaryContact Boolean @default(false)
+
+  @@unique([clientId, userId])
+}
+
+model Document {
+  id               String         @id @default(uuid())
+  clientId         String
+  client           Client         @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  uploadedByUserId String
+  uploader         User           @relation(fields: [uploadedByUserId], references: [id])
+  taxYear          Int
+  type             DocumentType
+  storageKey       String
+  originalFilename String
+  mimeType         String
+  sizeBytes        Int
+  status           DocumentStatus @default(pending_upload)
+  uploadedAt       DateTime       @default(now())
+  deletedAt        DateTime?
+
+  @@index([clientId, taxYear])
+}
+
+model TaxReturn {
+  id               String        @id @default(uuid())
+  clientId         String
+  client           Client        @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  taxYear          Int
+  type             TaxReturnType
+  storageKey       String
+  originalFilename String
+  preparedByUserId String
+  preparedBy       User          @relation(fields: [preparedByUserId], references: [id])
+  finalizedAt      DateTime?
+  notes            String?
+  createdAt        DateTime      @default(now())
+
+  @@unique([clientId, taxYear, type])
+}
+
+// Single source of truth for ERPNext connection info per client.
+// Credentials are sealed with AES-256-GCM (credentials.crypto.ts).
+model ErpNextSite {
+  id                 String    @id @default(uuid())
+  clientId           String    @unique
+  client             Client    @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  siteName           String
+  siteUrl            String
+  companyName        String
+  apiKeyEncrypted    String
+  apiSecretEncrypted String
+  apiUser            String?
+  lastHealthAt       DateTime?
+  lastHealthOk       Boolean?
+  healthError        String?
+  status            String    @default("active")
+  createdAt          DateTime  @default(now())
+}
+
+model ProvisioningJob {
+  id        String   @id @default(uuid())
+  clientId  String
+  client    Client   @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  state     JobState @default(queued)
+  error     String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model AuditLog {
+  id        String   @id @default(uuid())
+  userId    String
+  clientId  String
+  client    Client   @relation(fields: [clientId], references: [id])
+  action    String
+  targetId  String?
+  ip        String?
+  createdAt DateTime @default(now())
+
+  @@index([clientId, createdAt])
+  @@index([userId, createdAt])
+}
