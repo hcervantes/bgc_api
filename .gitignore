@@ -1,0 +1,43 @@
+# Dependencies
+node_modules/
+
+# Environment & secrets — NEVER commit these
+.env
+.env.*
+!.env.example
+
+# Keys & certificates (RS256 dev keypair, TLS, etc.)
+*.key
+*.pem
+!*.pub
+
+# Build output
+dist/
+build/
+out/
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+
+# Prisma
+prisma/*.db
+# Generated client goes to node_modules; keep schema + migrations tracked
+
+# Test / coverage
+coverage/
+.nyc_output/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+
+# Misc
+*.pid
+*.seed
+tmp/
+.cache/
