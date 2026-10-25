@@ -17,9 +17,11 @@ services:
     image: redis:7-alpine
     ports: ["6379:6379"]
 
-  clamav:
-    image: clamav/clamav:latest
-    ports: ["3310:3310"]
+  # NOTE: no clamav service here. The bgc-api app runs on the WSL host in
+  # dev and shares the PORTAL stack's clamd (bgc-portal-clamd) at
+  # localhost:3310 — one scanner for both stacks, mirroring prod where the
+  # app dials the single clamd container via CLAMD_HOST. (The API stack's
+  # own clamav used to collide on host port 3310 with the portal's.)
 
   minio: # local stand-in for DO Spaces
     image: pgsty/minio:latest
