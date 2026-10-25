@@ -125,16 +125,30 @@ export class StripeWebhookService {
     return value instanceof Date ? value : new Date(value * 1000);
   }
 
+  // 2025 API: Invoice.subscription no longer exists — the subscription
+  // reference moved to parent.subscription_details.subscription.
+  private invoiceSubscriptionId(invoice: Stripe.Invoice): string | null {
+    const sub = invoice.parent?.subscription_details?.subscription;
+    if (!sub) return null;
+    return typeof sub === 'string' ? sub : sub.id;
+  }
+
   private async onSubscriptionChange(sub: Stripe.Subscription): Promise<void> {
     const customerId = typeof sub.customer === 'string' ? sub.customer : sub.customer.id;
-    const priceId = sub.items.data[0]?.price?.id ?? null;
+    const item = sub.items.data[0];
+    const priceId = item?.price?.id ?? null;
+    // 2025 API: period boundaries live on the subscription ITEM, not the
+    // Subscription. Single-item subscriptions have exactly one item.
+    const currentPeriodEnd = item?.current_period_end
+      ? new Date(item.current_period_end * 1000)
+      : null;
     const portalUserId = sub.metadata?.portalUserId ?? null;
 
     const data = {
       stripeCustomerId: customerId,
       status: sub.status,
       priceId,
-      currentPeriodEnd: this.toNullableDate(sub.current_period_end),
+      currentPeriodEnd,
       canceledAt: this.toNullableDate(sub.canceled_at),
       // Never clobber a known portalUserId with null if metadata is absent.
       ...(portalUserId ? { portalUserId } : {}),
@@ -155,10 +169,7 @@ export class StripeWebhookService {
   }
 
   private async onInvoicePaid(invoice: Stripe.Invoice): Promise<void> {
-    const subscriptionId =
-      typeof invoice.subscription === 'string'
-        ? invoice.subscription
-        : invoice.subscription?.id;
+    const subscriptionId = this.invoiceSubscriptionId(invoice);
     if (!subscriptionId) return; // one-off invoice, not subscription billing
 
     // Best-effort: subscription.* events remain the canonical status source.
@@ -169,10 +180,7 @@ export class StripeWebhookService {
   }
 
   private async onInvoicePaymentFailed(invoice: Stripe.Invoice): Promise<void> {
-    const subscriptionId =
-      typeof invoice.subscription === 'string'
-        ? invoice.subscription
-        : invoice.subscription?.id;
+    const subscriptionId = this.invoiceSubscriptionId(invoice);
     if (!subscriptionId) return;
 
     await this.prisma.stripeSubscription.updateMany({
