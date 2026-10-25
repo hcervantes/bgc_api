@@ -176,3 +176,32 @@ model AuditLog {
   @@index([clientId, createdAt])
   @@index([userId, createdAt])
 }
+
+// ─── Stripe billing (Phase 1: subscriptions via webhook) ───────────────
+
+// Webhook event dedupe: the unique eventId makes every handler idempotent —
+// Stripe retries on any non-2xx and can deliver the same event more than
+// once (checkouts also emit overlapping subscription + invoice events).
+model StripeEvent {
+  id          String   @id @default(uuid())
+  eventId     String   @unique // Stripe's evt_...
+  type        String
+  payload     Json
+  processedAt DateTime @default(now())
+}
+
+// Mirror of the Stripe subscription, keyed by Stripe ids. portalUserId
+// comes from subscription metadata (set by the portal at checkout).
+// Phase 2 will add the clientId link for ERPNext Company provisioning.
+model StripeSubscription {
+  id                   String    @id @default(uuid())
+  stripeSubscriptionId String    @unique
+  stripeCustomerId     String    @unique
+  portalUserId         String?
+  status               String // active | trialing | past_due | canceled | incomplete
+  priceId              String?
+  currentPeriodEnd     DateTime?
+  canceledAt           DateTime?
+  createdAt            DateTime  @default(now())
+  updatedAt            DateTime  @updatedAt
+}
