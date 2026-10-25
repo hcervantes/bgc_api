@@ -7,6 +7,7 @@ import { ClientsModule } from './modules/clients/clients.module';
 import { ErpNextModule } from './modules/erpnext/erpnext.module';
 import { DocumentsModule } from './modules/documents/documents.module';
 import { TaxReturnsModule } from './modules/tax-returns/tax-returns.module';
+import { StripeModule } from './modules/stripe/stripe.module';
 
 @Module({
   imports: [
@@ -18,6 +19,7 @@ import { TaxReturnsModule } from './modules/tax-returns/tax-returns.module';
     ErpNextModule,
     DocumentsModule,
     TaxReturnsModule,
+    StripeModule,
   ],
 })
 export class AppModule {}
