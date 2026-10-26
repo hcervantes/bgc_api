@@ -59,21 +59,16 @@ export class BooksService {
       throw new BadRequestException('type must be expense, income, or asset');
     }
     const client = await this.loadTenantBook(tenant);
-    const filters = JSON.stringify([
-      ['Account', 'company', '=', client.erpCompanyName],
-      ['Account', 'account_type', '=', ACCOUNT_TYPE_BY_ENTRY[type as EntryType]],
-      ['Account', 'is_group', '=', 0],
-    ]);
-    const fields = JSON.stringify(['name', 'account_name']);
-    const res = (await this.erp.request(
-      'GET',
-      '/api/resource/Account?filters=' +
-        encodeURIComponent(filters) +
-        '&fields=' +
-        encodeURIComponent(fields) +
-        '&limit_page_length=0',
-    )) as { data?: Array<{ name: string; account_name: string }> };
-    return (res?.data ?? []).map((a) => ({ name: a.name, label: a.account_name }));
+    const rows = await this.erp.listResource<{ name: string; account_name: string }>({
+      doctype: 'Account',
+      filters: [
+        ['Account', 'company', '=', client.erpCompanyName],
+        ['Account', 'account_type', '=', ACCOUNT_TYPE_BY_ENTRY[type as EntryType]],
+        ['Account', 'is_group', '=', 0],
+      ],
+      fields: ['name', 'account_name'],
+    });
+    return rows.map((a) => ({ name: a.name, label: a.account_name }));
   }
 
   async createEntry(
@@ -87,10 +82,7 @@ export class BooksService {
     // Cross-tenant guarantee: the account must exist AND belong to the
     // tenant's Company with the expected account_type. Foreign account →
     // 404 (anti-enumeration), never a write.
-    const account = (await this.erp.request(
-      'GET',
-      '/api/resource/Account/' + encodeURIComponent(dto.accountName),
-    )) as { company?: string; account_type?: string };
+    const account = await this.erp.getResource<{ company?: string; account_type?: string }>('Account', dto.accountName);
     if (account?.company !== client.erpCompanyName || account?.account_type !== expectedType) {
       throw new NotFoundException('ACCOUNT_NOT_FOUND');
     }
@@ -144,20 +136,17 @@ export class BooksService {
     Array<{ id: string; date: string; description: string; total: number; status: string }>
   > {
     const client = await this.loadTenantBook(tenant);
-    const filters = JSON.stringify([
-      ['Journal Entry', 'company', '=', client.erpCompanyName],
-      ['Journal Entry', 'portal_entry', '=', 1],
-    ]);
-    const fields = JSON.stringify(['name', 'posting_date', 'user_remark', 'total', 'docstatus']);
-    const res = (await this.erp.request(
-      'GET',
-      '/api/resource/Journal Entry?filters=' +
-        encodeURIComponent(filters) +
-        '&fields=' +
-        encodeURIComponent(fields) +
-        '&order_by=posting_date desc&limit_page_length=50',
-    )) as { data?: Array<Record<string, unknown>> };
-    return (res?.data ?? []).map((je) => ({
+    const rows = await this.erp.listResource<Record<string, unknown>>({
+      doctype: 'Journal Entry',
+      filters: [
+        ['Journal Entry', 'company', '=', client.erpCompanyName],
+        ['Journal Entry', 'portal_entry', '=', 1],
+      ],
+      fields: ['name', 'posting_date', 'user_remark', 'total', 'docstatus'],
+      orderBy: 'posting_date desc',
+      limit: 50,
+    });
+    return rows.map((je) => ({
       id: je.name as string,
       date: je.posting_date as string,
       description: (je.user_remark as string) ?? '',
@@ -183,19 +172,14 @@ export class BooksService {
       },
     ];
     for (const f of fields) {
-      try {
-        await this.erp.request('GET', '/api/resource/Custom Field/' + encodeURIComponent(f.docname));
-      } catch {
-        await this.erp.request('POST', '/api/resource/Custom Field', {
-          dt: 'Journal Entry',
-          fieldname: f.fieldname,
-          label: f.label,
-          fieldtype: f.fieldtype,
-          insert_after: 'stripe_invoice_id',
-          read_only: 1,
-        });
-        this.logger.log('Created Custom Field Journal Entry.' + f.fieldname);
-      }
+      await this.erp.ensureCustomField({
+        docname: f.docname,
+        dt: 'Journal Entry',
+        fieldname: f.fieldname,
+        label: f.label,
+        fieldtype: f.fieldtype,
+        insertAfter: 'stripe_invoice_id',
+      });
     }
   }
 }
