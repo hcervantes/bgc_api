@@ -67,8 +67,16 @@ export class ErpProvisioningService {
     // Idempotency: reuse the row across retries, but only a FULLY
     // provisioned client (bookkeepingEnabled) short-circuits — a row left
     // behind by a failed attempt must continue, not be treated as done.
+    // The slug fallback catches rows from failed attempts whose
+    // stripeSubscription link was never written (it's deterministic:
+    // name/email + customer-id tail).
     let client = await this.prisma.client.findFirst({
-      where: { stripeSubscription: { stripeCustomerId: sub.stripeCustomerId } },
+      where: {
+        OR: [
+          { stripeSubscription: { stripeCustomerId: sub.stripeCustomerId } },
+          { slug },
+        ],
+      },
     });
     if (client?.bookkeepingEnabled) return client.id;
 
@@ -84,6 +92,11 @@ export class ErpProvisioningService {
         },
       });
     }
+    // Link the subscription IMMEDIATELY (not after provisioning succeeds)
+    // so retries find the row via the relation, not just the slug.
+    await this.prisma.stripeSubscription
+      .update({ where: { stripeCustomerId: sub.stripeCustomerId }, data: { clientId: client.id } })
+      .catch(() => undefined);
     const job = await this.prisma.provisioningJob.create({
       data: { clientId: client.id, state: 'queued' },
     });
