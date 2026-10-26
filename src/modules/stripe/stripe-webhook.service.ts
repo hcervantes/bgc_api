@@ -221,13 +221,17 @@ export class StripeWebhookService {
       include: { client: true },
     });
     const client = sub?.client;
-    if (client?.bookkeepingEnabled && client.erpCompanyName) {
+    // stripe@18 2025 typings: resource ids are optional — guard before use.
+    if (client?.bookkeepingEnabled && client.erpCompanyName && invoice.id) {
       await this.invoiceSync.syncPaidInvoice(
         { erpCompanyName: client.erpCompanyName, slug: client.slug },
         {
           id: invoice.id,
+          // 2025 API: top-level paid_at is gone — it lives on
+          // status_transitions (falling back to created).
           amountPaidCents: invoice.amount_paid,
-          paidAt: this.toNullableDate(invoice.paid_at ?? invoice.created) ?? new Date(),
+          paidAt:
+            this.toNullableDate(invoice.status_transitions?.paid_at ?? invoice.created) ?? new Date(),
         },
       );
     }
