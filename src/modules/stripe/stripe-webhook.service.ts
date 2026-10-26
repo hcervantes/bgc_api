@@ -7,6 +7,7 @@ import {
 import { ConfigService } from '@nestjs/config';
 import Stripe from 'stripe';
 import { PrismaService } from '../../common/prisma/prisma.service';
+import { ErpProvisioningService } from '../erpnext/provisioning.service';
 
 // ─────────────────────────────────────────────────────────────────────────
 // Stripe webhook processing (Phase 1).
@@ -30,6 +31,7 @@ export class StripeWebhookService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly config: ConfigService,
+    private readonly provisioning: ErpProvisioningService,
   ) {
     const key = this.config.get<string>('STRIPE_SECRET_KEY');
     if (!key) {
@@ -166,8 +168,32 @@ export class StripeWebhookService {
       update: { stripeSubscriptionId: sub.id, ...data },
     });
 
-    // TODO(Phase 2): when status === 'active' and no Client is linked,
-    // trigger ERPNext Company + CoA provisioning and set clientId.
+    // ── Phase 2: ERPNext provisioning ──────────────────────────────
+    // First activation provisions the tenant + Company; cancel flips to
+    // cancel-and-retain offboarding; resubscribe re-enables. Idempotent.
+    if (['active', 'trialing'].includes(record.status)) {
+      if (!record.clientId) {
+        const customer = await this.stripe.customers.retrieve(customerId);
+        if (!(customer as { deleted?: boolean }).deleted) {
+          const { name, email } = customer as Stripe.Customer;
+          const clientId = await this.provisioning.provisionForSubscription(
+            {
+              stripeSubscriptionId: record.stripeSubscriptionId,
+              stripeCustomerId: customerId,
+              portalUserId: record.portalUserId,
+            },
+            { name: name ?? null, email: email ?? null },
+          );
+          await this.prisma.stripeSubscription.update({ where: { id: record.id }, data: { clientId } });
+          this.logger.log('Linked subscription ' + sub.id + ' → client ' + clientId);
+        }
+      } else {
+        // Resubscribe after cancel: re-enable the existing tenant.
+        await this.provisioning.setBookkeepingEnabled(record.clientId, true);
+      }
+    } else if (record.status === 'canceled' && record.clientId) {
+      await this.provisioning.setBookkeepingEnabled(record.clientId, false);
+    }
 
     this.logger.log(
       `Subscription ${sub.id} → ${sub.status} (customer ${customerId}, user ${record.portalUserId ?? 'unknown'})`,

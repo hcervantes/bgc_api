@@ -77,12 +77,14 @@ model Client {
   email              String
   status             ClientStatus      @default(active)
   bookkeepingEnabled Boolean           @default(false)
+  erpCompanyName     String?
   createdAt          DateTime          @default(now())
   updatedAt          DateTime          @updatedAt
   users              ClientUser[]
   documents          Document[]
   taxReturns         TaxReturn[]
   erpSite            ErpNextSite?
+  stripeSubscription StripeSubscription?
   provisioningJobs   ProvisioningJob[]
   auditLogs          AuditLog[]
 }
@@ -198,6 +200,9 @@ model StripeSubscription {
   stripeSubscriptionId String    @unique
   stripeCustomerId     String    @unique
   portalUserId         String?
+  // Phase 2: the provisioned tenant this subscription pays for.
+  clientId             String?
+  client               Client?   @relation(fields: [clientId], references: [id])
   status               String // active | trialing | past_due | canceled | incomplete
   priceId              String?
   currentPeriodEnd     DateTime?
