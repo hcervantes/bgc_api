@@ -157,7 +157,14 @@ export class ErpProvisioningService {
       // from a failed run where the Company was never created — recreate it
       // instead of trusting the flag.
       if (enabled && !(await this.erp.companyExists(client.erpCompanyName))) {
+        // Job-tracked like the primary path so every Company creation is
+        // auditable in ProvisioningJob.
+        const job = await this.prisma.provisioningJob.create({
+          data: { clientId: client.id, state: 'queued' },
+        });
         await this.erp.createCompany(client.erpCompanyName, this.abbrFor(client.erpCompanyName));
+        await this.prisma.provisioningJob.update({ where: { id: job.id }, data: { state: 'company_created' } });
+        await this.prisma.provisioningJob.update({ where: { id: job.id }, data: { state: 'done' } });
       }
       await this.erp.setCompanyDisabled(client.erpCompanyName, !enabled).catch((err) =>
         this.logger.warn(

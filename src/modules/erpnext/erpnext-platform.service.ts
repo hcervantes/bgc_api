@@ -86,6 +86,7 @@ export class ErpPlatformService {
       default_currency: 'USD',
       company_type: 'Company',
     });
+    this.logger.log('Created ERPNext Company "' + companyName + '" (' + abbr + ')');
   }
 
   async setCompanyDisabled(companyName: string, disabled: boolean): Promise<void> {
