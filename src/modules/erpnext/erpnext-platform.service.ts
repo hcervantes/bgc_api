@@ -107,4 +107,87 @@ export class ErpPlatformService {
       this.logger.warn('Company cleanup for "' + companyName + '" failed: ' + String(err));
     }
   }
+
+  // ── Invoice sync (phase 2) ──────────────────────────────────────────────
+
+  /** Custom Field Journal Entry.stripe_invoice_id — dedupe key for mirrored charges. */
+  async ensureJournalEntryCustomField(): Promise<void> {
+    const docname = 'Journal Entry-stripe_invoice_id';
+    try {
+      await this.request('GET', '/api/resource/Custom Field/' + encodeURIComponent(docname));
+      return;
+    } catch {
+      /* not created yet */
+    }
+    await this.request('POST', '/api/resource/Custom Field', {
+      dt: 'Journal Entry',
+      fieldname: 'stripe_invoice_id',
+      label: 'Stripe Invoice ID',
+      fieldtype: 'Data',
+      insert_after: 'voucher_type',
+      read_only: 1,
+    });
+    this.logger.log('Created Custom Field Journal Entry.stripe_invoice_id');
+  }
+
+  async findJournalEntryByStripeId(
+    stripeInvoiceId: string,
+  ): Promise<{ name: string; docstatus: number } | null> {
+    const filters = JSON.stringify([['Journal Entry', 'stripe_invoice_id', '=', stripeInvoiceId]]);
+    const fields = JSON.stringify(['name', 'docstatus']);
+    const res = (await this.request(
+      'GET',
+      '/api/resource/Journal Entry?filters=' +
+        encodeURIComponent(filters) +
+        '&fields=' +
+        encodeURIComponent(fields) +
+        '&limit_page_length=1',
+    )) as { data?: Array<{ name?: string; docstatus?: number }> };
+    const row = res?.data?.[0];
+    if (!row?.name) return null;
+    // docstatus comes back 0 (draft) / 1 (submitted); default to 0 if absent.
+    return { name: row.name, docstatus: row.docstatus ?? 0 };
+  }
+
+  /**
+   * BGC subscription fee = EXPENSE in the client's books: "Bookkeeping
+   * Fees" (leaf) under Indirect Expenses. Returns the full account docname,
+   * e.g. "Bookkeeping Fees - NC". The abbr matches the one sent at Company
+   * creation (same initials algorithm — deterministic).
+   */
+  async ensureExpenseAccount(companyName: string, abbr: string): Promise<string> {
+    const accountName = 'Bookkeeping Fees - ' + abbr;
+    try {
+      await this.request('GET', '/api/resource/Account/' + encodeURIComponent(accountName));
+      return accountName;
+    } catch {
+      /* create below */
+    }
+    await this.request('POST', '/api/resource/Account', {
+      account_name: 'Bookkeeping Fees',
+      company: companyName,
+      parent_account: 'Indirect Expenses - ' + abbr,
+      account_type: 'Expense Account',
+      is_group: 0,
+    });
+    this.logger.log('Created ERPNext Account "' + accountName + '"');
+    return accountName;
+  }
+
+  async createJournalEntry(payload: Record<string, unknown>): Promise<string> {
+    const res = (await this.request('POST', '/api/resource/Journal Entry', payload)) as {
+      name?: string;
+      data?: { name?: string };
+    };
+    const name = res?.name ?? res?.data?.name;
+    if (!name) throw new Error('Journal Entry created but response carried no name: ' + JSON.stringify(res));
+    return name;
+  }
+
+  async submitJournalEntry(jeName: string): Promise<void> {
+    await this.request('PUT', '/api/resource/Journal Entry/' + encodeURIComponent(jeName), {
+      docstatus: 1,
+    });
+    this.logger.log('Submitted Journal Entry ' + jeName);
+  }
 }
