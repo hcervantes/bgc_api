@@ -220,6 +220,17 @@ export class StripeWebhookService {
       where: { stripeSubscriptionId: subscriptionId },
       include: { client: true },
     });
+    // invoice.paid routinely arrives BEFORE the customer.subscription.*
+    // events finish provisioning the tenant (observed live: invoice at
+    // +0s, provisioning done at +4s). Fail the event in that window so
+    // Stripe re-delivers it — the dedupe row is deleted on failure and the
+    // retry lands against a fully provisioned tenant. Once the tenant is
+    // provisioned but offboarded (bookkeepingEnabled=false), skip silently.
+    if (!sub || (!sub.clientId && sub.status !== 'canceled')) {
+      throw new Error(
+        'Tenant not yet provisioned for subscription ' + subscriptionId + ' — failing for Stripe retry',
+      );
+    }
     const client = sub?.client;
     // stripe@18 2025 typings: resource ids are optional — guard before use.
     if (client?.bookkeepingEnabled && client.erpCompanyName && invoice.id) {
