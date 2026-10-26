@@ -1,5 +1,6 @@
-import { Controller, Get } from '@nestjs/common';
+import { Controller, Get, UseGuards } from '@nestjs/common';
 import { CurrentUser, SessionUser } from '../../common/auth/current-user.decorator';
+import { JwtAuthGuard } from '../../common/auth/jwt-auth.guard';
 import { PrismaService } from '../../common/prisma/prisma.service';
 
 // GET /v1/billing/status — called by the portal with the user's session
@@ -11,6 +12,9 @@ import { PrismaService } from '../../common/prisma/prisma.service';
 // keeps this correct even if a user ever has more than one subscription
 // row (e.g. after a cancel + resubscribe cycle).
 @Controller('billing/status')
+// JwtAuthGuard is per-controller in this codebase (not global) — without
+// it, unauthenticated requests reach the handler with req.user undefined.
+@UseGuards(JwtAuthGuard)
 export class BillingStatusController {
   constructor(private readonly prisma: PrismaService) {}
 
