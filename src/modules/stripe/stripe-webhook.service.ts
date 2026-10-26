@@ -154,10 +154,16 @@ export class StripeWebhookService {
       ...(portalUserId ? { portalUserId } : {}),
     };
 
+    // Keyed by CUSTOMER, not subscription id: resubscribing creates a NEW
+    // subscription id for the SAME customer. Upserting on subscription id
+    // would attempt an insert and collide with the stripeCustomerId unique
+    // constraint (P2002). One row per customer, refreshed in place — the
+    // update also re-points stripeSubscriptionId so the invoice handlers
+    // (updateMany by subscription id) keep matching after a resubscribe.
     const record = await this.prisma.stripeSubscription.upsert({
-      where: { stripeSubscriptionId: sub.id },
+      where: { stripeCustomerId: customerId },
       create: { stripeSubscriptionId: sub.id, portalUserId, ...data },
-      update: data,
+      update: { stripeSubscriptionId: sub.id, ...data },
     });
 
     // TODO(Phase 2): when status === 'active' and no Client is linked,
