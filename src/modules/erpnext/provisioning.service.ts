@@ -64,22 +64,26 @@ export class ErpProvisioningService {
     const email = customer.email || 'unknown+' + sub.stripeCustomerId + '@example.invalid';
     const slug = this.slugFor(customer.name || '', email, sub.stripeCustomerId);
 
-    // Idempotency: a retry after a partially-failed run reuses the row.
-    const existing = await this.prisma.client.findFirst({
+    // Idempotency: reuse the row across retries, but only a FULLY
+    // provisioned client (bookkeepingEnabled) short-circuits — a row left
+    // behind by a failed attempt must continue, not be treated as done.
+    let client = await this.prisma.client.findFirst({
       where: { stripeSubscription: { stripeCustomerId: sub.stripeCustomerId } },
     });
-    if (existing) return existing.id;
+    if (client?.bookkeepingEnabled) return client.id;
 
-    const client = await this.prisma.client.create({
-      data: {
-        slug,
-        name: companyName,
-        legalName: companyName,
-        email,
-        erpCompanyName: companyName,
-        bookkeepingEnabled: false, // flipped on after the Company exists
-      },
-    });
+    if (!client) {
+      client = await this.prisma.client.create({
+        data: {
+          slug,
+          name: companyName,
+          legalName: companyName,
+          email,
+          erpCompanyName: companyName,
+          bookkeepingEnabled: false, // flipped on after the Company exists
+        },
+      });
+    }
     const job = await this.prisma.provisioningJob.create({
       data: { clientId: client.id, state: 'queued' },
     });
