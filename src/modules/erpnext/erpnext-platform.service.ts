@@ -13,6 +13,8 @@ import { Injectable, Logger } from '@nestjs/common';
  *   ERPNEXT_SITE_URL     e.g. http://bgc-dev.localhost
  *   ERPNEXT_API_KEY      service account api_key
  *   ERPNEXT_API_SECRET   service account api_secret
+ * Falls back to the seeded spike credentials if the primary set is absent:
+ *   ERPNEXT_SEED_SITE_URL / ERPNEXT_SEED_API_KEY / ERPNEXT_SEED_API_SECRET
  *
  * Service-account roles (spike matrix): Accounts Manager + Sales Manager +
  * Sales Master Manager (add the Purchase twins when purchase flows arrive).
@@ -23,12 +25,12 @@ export class ErpPlatformService {
   private readonly logger = new Logger(ErpPlatformService.name);
 
   private creds(): { siteUrl: string; auth: string } {
-    const siteUrl = process.env.ERPNEXT_SITE_URL?.replace(/\/$/, '');
-    const apiKey = process.env.ERPNEXT_API_KEY;
-    const apiSecret = process.env.ERPNEXT_API_SECRET;
+    const siteUrl = (process.env.ERPNEXT_SITE_URL ?? process.env.ERPNEXT_SEED_SITE_URL)?.replace(/\/$/, '');
+    const apiKey = process.env.ERPNEXT_API_KEY ?? process.env.ERPNEXT_SEED_API_KEY;
+    const apiSecret = process.env.ERPNEXT_API_SECRET ?? process.env.ERPNEXT_SEED_API_SECRET;
     if (!siteUrl || !apiKey || !apiSecret) {
       throw new Error(
-        'ERPNEXT_SITE_URL / ERPNEXT_API_KEY / ERPNEXT_API_SECRET are not set — ERPNext provisioning is not configured',
+        'ERPNEXT_SITE_URL/API_KEY/API_SECRET (or the ERPNEXT_SEED_* fallbacks) are not set — ERPNext provisioning is not configured',
       );
     }
     return { siteUrl, auth: 'token ' + apiKey + ':' + apiSecret };
