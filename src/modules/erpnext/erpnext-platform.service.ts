@@ -130,7 +130,9 @@ export class ErpPlatformService {
     this.logger.log('Created Custom Field Journal Entry.stripe_invoice_id');
   }
 
-  async findJournalEntryByStripeId(stripeInvoiceId: string): Promise<string | null> {
+  async findJournalEntryByStripeId(
+    stripeInvoiceId: string,
+  ): Promise<{ name: string; docstatus: number } | null> {
     const filters = JSON.stringify([['Journal Entry', 'stripe_invoice_id', '=', stripeInvoiceId]]);
     const fields = JSON.stringify(['name', 'docstatus']);
     const res = (await this.request(
@@ -140,8 +142,9 @@ export class ErpPlatformService {
         '&fields=' +
         encodeURIComponent(fields) +
         '&limit_page_length=1',
-    )) as { data?: Array<{ name: string }> };
-    return res?.data?.[0]?.name ?? null;
+    )) as { data?: Array<{ name?: string; docstatus?: number }> };
+    const row = res?.data?.[0];
+    return row?.name ? { name: row.name, docstatus: row.docstatus } : null;
   }
 
   /**
@@ -170,8 +173,13 @@ export class ErpPlatformService {
   }
 
   async createJournalEntry(payload: Record<string, unknown>): Promise<string> {
-    const res = (await this.request('POST', '/api/resource/Journal Entry', payload)) as { name: string };
-    return res.name;
+    const res = (await this.request('POST', '/api/resource/Journal Entry', payload)) as {
+      name?: string;
+      data?: { name?: string };
+    };
+    const name = res?.name ?? res?.data?.name;
+    if (!name) throw new Error('Journal Entry created but response carried no name: ' + JSON.stringify(res));
+    return name;
   }
 
   async submitJournalEntry(jeName: string): Promise<void> {

@@ -45,7 +45,13 @@ export class ErpInvoiceSyncService {
 
     const existing = await this.erp.findJournalEntryByStripeId(inv.id);
     if (existing) {
-      this.logger.log('Invoice ' + inv.id + ' already mirrored as Journal Entry ' + existing + ' — skipping');
+      if (existing.docstatus === 0) {
+        // Draft from a crash between create and submit — resume it.
+        this.logger.log('Invoice ' + inv.id + ' found as DRAFT Journal Entry ' + existing.name + ' — submitting');
+        await this.erp.submitJournalEntry(existing.name);
+        return;
+      }
+      this.logger.log('Invoice ' + inv.id + ' already mirrored as Journal Entry ' + existing.name + ' — skipping');
       return;
     }
 
