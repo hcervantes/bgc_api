@@ -144,7 +144,9 @@ export class ErpPlatformService {
         '&limit_page_length=1',
     )) as { data?: Array<{ name?: string; docstatus?: number }> };
     const row = res?.data?.[0];
-    return row?.name ? { name: row.name, docstatus: row.docstatus } : null;
+    if (!row?.name) return null;
+    // docstatus comes back 0 (draft) / 1 (submitted); default to 0 if absent.
+    return { name: row.name, docstatus: row.docstatus ?? 0 };
   }
 
   /**
