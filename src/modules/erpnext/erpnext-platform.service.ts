@@ -83,6 +83,7 @@ export class ErpPlatformService {
       company_name: companyName,
       abbr,
       country: 'United States',
+      default_currency: 'USD',
       company_type: 'Company',
     });
   }
