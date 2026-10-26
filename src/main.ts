@@ -6,7 +6,10 @@ import helmet from 'helmet';
 import { AppModule } from './app.module';
 
 async function bootstrap() {
-  const app = await NestFactory.create(AppModule);
+  // rawBody: true keeps the unparsed request body available on req.rawBody —
+// required for Stripe webhook signature verification (HMAC over raw bytes;
+// a re-serialized parsed body produces a different signature).
+const app = await NestFactory.create(AppModule, { rawBody: true });
   const config = app.get(ConfigService);
 
   app.setGlobalPrefix('v1');
