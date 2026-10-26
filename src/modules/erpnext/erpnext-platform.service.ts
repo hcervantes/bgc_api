@@ -76,11 +76,13 @@ export class ErpPlatformService {
       this.logger.log('Company "' + companyName + '" already exists — skipping create (idempotent retry)');
       return;
     }
+    // Company doctype: the name field is company_name (docname is
+    // derived from it). chart_of_accounts omitted → ERPNext default
+    // standard chart (97 accounts, " - <ABBR>" suffixes — spike-verified).
     await this.request('POST', '/api/resource/Company', {
-      company: companyName,
+      company_name: companyName,
       abbr,
       country: 'United States',
-      chart_of_accounts: 'Standard',
       company_type: 'Company',
     });
   }

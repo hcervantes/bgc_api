@@ -153,6 +153,12 @@ export class ErpProvisioningService {
     });
 
     if (client.erpCompanyName) {
+      // Self-heal (re-enable only): a row can carry bookkeepingEnabled=true
+      // from a failed run where the Company was never created — recreate it
+      // instead of trusting the flag.
+      if (enabled && !(await this.erp.companyExists(client.erpCompanyName))) {
+        await this.erp.createCompany(client.erpCompanyName, this.abbrFor(client.erpCompanyName));
+      }
       await this.erp.setCompanyDisabled(client.erpCompanyName, !enabled).catch((err) =>
         this.logger.warn(
           'Could not ' + (enabled ? 're-enable' : 'disable') + ' ERPNext Company "' + client.erpCompanyName + '": ' + String(err),
