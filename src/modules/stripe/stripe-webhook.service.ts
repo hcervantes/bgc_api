@@ -213,8 +213,9 @@ export class StripeWebhookService {
     });
 
     // ── Phase 2: mirror the paid invoice into the tenant's ERPNext books.
-    // One submitted Sales Invoice per paid Stripe invoice, deduped via the
-    // stripe_invoice_id custom field — safe under Stripe retries.
+    // One submitted Journal Entry per paid Stripe invoice (expense in the
+    // CLIENT's books), deduped via the stripe_invoice_id custom field —
+    // safe under Stripe retries.
     const sub = await this.prisma.stripeSubscription.findFirst({
       where: { stripeSubscriptionId: subscriptionId },
       include: { client: true },

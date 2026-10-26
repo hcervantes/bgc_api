@@ -110,9 +110,9 @@ export class ErpPlatformService {
 
   // ── Invoice sync (phase 2) ──────────────────────────────────────────────
 
-  /** Custom Field Sales Invoice.stripe_invoice_id — dedupe key for mirrored invoices. */
-  async ensureSalesInvoiceCustomField(): Promise<void> {
-    const docname = 'Sales Invoice-stripe_invoice_id';
+  /** Custom Field Journal Entry.stripe_invoice_id — dedupe key for mirrored charges. */
+  async ensureJournalEntryCustomField(): Promise<void> {
+    const docname = 'Journal Entry-stripe_invoice_id';
     try {
       await this.request('GET', '/api/resource/Custom Field/' + encodeURIComponent(docname));
       return;
@@ -120,22 +120,22 @@ export class ErpPlatformService {
       /* not created yet */
     }
     await this.request('POST', '/api/resource/Custom Field', {
-      dt: 'Sales Invoice',
+      dt: 'Journal Entry',
       fieldname: 'stripe_invoice_id',
       label: 'Stripe Invoice ID',
       fieldtype: 'Data',
-      insert_after: 'customer',
+      insert_after: 'voucher_type',
       read_only: 1,
     });
-    this.logger.log('Created Custom Field Sales Invoice.stripe_invoice_id');
+    this.logger.log('Created Custom Field Journal Entry.stripe_invoice_id');
   }
 
-  async findSalesInvoiceByStripeId(stripeInvoiceId: string): Promise<string | null> {
-    const filters = JSON.stringify([['Sales Invoice', 'stripe_invoice_id', '=', stripeInvoiceId]]);
+  async findJournalEntryByStripeId(stripeInvoiceId: string): Promise<string | null> {
+    const filters = JSON.stringify([['Journal Entry', 'stripe_invoice_id', '=', stripeInvoiceId]]);
     const fields = JSON.stringify(['name', 'docstatus']);
     const res = (await this.request(
       'GET',
-      '/api/resource/Sales Invoice?filters=' +
+      '/api/resource/Journal Entry?filters=' +
         encodeURIComponent(filters) +
         '&fields=' +
         encodeURIComponent(fields) +
@@ -144,49 +144,40 @@ export class ErpPlatformService {
     return res?.data?.[0]?.name ?? null;
   }
 
-  /** Customer is not company-scoped in ERPNext; keyed by tenant name. */
-  async ensureCustomer(name: string): Promise<string> {
+  /**
+   * BGC subscription fee = EXPENSE in the client's books: "Bookkeeping
+   * Fees" (leaf) under Indirect Expenses. Returns the full account docname,
+   * e.g. "Bookkeeping Fees - NC". The abbr matches the one sent at Company
+   * creation (same initials algorithm — deterministic).
+   */
+  async ensureExpenseAccount(companyName: string, abbr: string): Promise<string> {
+    const accountName = 'Bookkeeping Fees - ' + abbr;
     try {
-      await this.request('GET', '/api/resource/Customer/' + encodeURIComponent(name));
-      return name;
+      await this.request('GET', '/api/resource/Account/' + encodeURIComponent(accountName));
+      return accountName;
     } catch {
       /* create below */
     }
-    await this.request('POST', '/api/resource/Customer', {
-      customer_name: name,
-      customer_type: 'Individual',
-      customer_group: 'Individual',
-      territory: 'All Territories',
+    await this.request('POST', '/api/resource/Account', {
+      account_name: 'Bookkeeping Fees',
+      company: companyName,
+      parent_account: 'Indirect Expenses - ' + abbr,
+      account_type: 'Expense Account',
+      is_group: 0,
     });
-    this.logger.log('Created ERPNext Customer "' + name + '"');
-    return name;
+    this.logger.log('Created ERPNext Account "' + accountName + '"');
+    return accountName;
   }
 
-  async ensureItem(itemCode: string, itemName = itemCode): Promise<void> {
-    try {
-      await this.request('GET', '/api/resource/Item/' + encodeURIComponent(itemCode));
-      return;
-    } catch {
-      /* create below */
-    }
-    await this.request('POST', '/api/resource/Item', {
-      item_code: itemCode,
-      item_name: itemName,
-      item_group: 'Services',
-      stock_item: 0,
-    });
-    this.logger.log('Created ERPNext Item "' + itemCode + '"');
-  }
-
-  async createSalesInvoice(payload: Record<string, unknown>): Promise<string> {
-    const res = (await this.request('POST', '/api/resource/Sales Invoice', payload)) as { name: string };
+  async createJournalEntry(payload: Record<string, unknown>): Promise<string> {
+    const res = (await this.request('POST', '/api/resource/Journal Entry', payload)) as { name: string };
     return res.name;
   }
 
-  async submitSalesInvoice(invoiceName: string): Promise<void> {
-    await this.request('PUT', '/api/resource/Sales Invoice/' + encodeURIComponent(invoiceName), {
+  async submitJournalEntry(jeName: string): Promise<void> {
+    await this.request('PUT', '/api/resource/Journal Entry/' + encodeURIComponent(jeName), {
       docstatus: 1,
     });
-    this.logger.log('Submitted Sales Invoice ' + invoiceName);
+    this.logger.log('Submitted Journal Entry ' + jeName);
   }
 }
