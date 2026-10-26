@@ -201,7 +201,9 @@ model StripeSubscription {
   stripeCustomerId     String    @unique
   portalUserId         String?
   // Phase 2: the provisioned tenant this subscription pays for.
-  clientId             String?
+  // @unique: one-to-one with Client — the mirror is one row per customer
+  // (resubscribe updates in place), and this enforces it at the DB level.
+  clientId             String?   @unique
   client               Client?   @relation(fields: [clientId], references: [id])
   status               String // active | trialing | past_due | canceled | incomplete
   priceId              String?
