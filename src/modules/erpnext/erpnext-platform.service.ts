@@ -107,4 +107,86 @@ export class ErpPlatformService {
       this.logger.warn('Company cleanup for "' + companyName + '" failed: ' + String(err));
     }
   }
+
+  // ── Invoice sync (phase 2) ──────────────────────────────────────────────
+
+  /** Custom Field Sales Invoice.stripe_invoice_id — dedupe key for mirrored invoices. */
+  async ensureSalesInvoiceCustomField(): Promise<void> {
+    const docname = 'Sales Invoice-stripe_invoice_id';
+    try {
+      await this.request('GET', '/api/resource/Custom Field/' + encodeURIComponent(docname));
+      return;
+    } catch {
+      /* not created yet */
+    }
+    await this.request('POST', '/api/resource/Custom Field', {
+      dt: 'Sales Invoice',
+      fieldname: 'stripe_invoice_id',
+      label: 'Stripe Invoice ID',
+      fieldtype: 'Data',
+      insert_after: 'customer',
+      read_only: 1,
+    });
+    this.logger.log('Created Custom Field Sales Invoice.stripe_invoice_id');
+  }
+
+  async findSalesInvoiceByStripeId(stripeInvoiceId: string): Promise<string | null> {
+    const filters = JSON.stringify([['Sales Invoice', 'stripe_invoice_id', '=', stripeInvoiceId]]);
+    const fields = JSON.stringify(['name', 'docstatus']);
+    const res = (await this.request(
+      'GET',
+      '/api/resource/Sales Invoice?filters=' +
+        encodeURIComponent(filters) +
+        '&fields=' +
+        encodeURIComponent(fields) +
+        '&limit_page_length=1',
+    )) as { data?: Array<{ name: string }> };
+    return res?.data?.[0]?.name ?? null;
+  }
+
+  /** Customer is not company-scoped in ERPNext; keyed by tenant name. */
+  async ensureCustomer(name: string): Promise<string> {
+    try {
+      await this.request('GET', '/api/resource/Customer/' + encodeURIComponent(name));
+      return name;
+    } catch {
+      /* create below */
+    }
+    await this.request('POST', '/api/resource/Customer', {
+      customer_name: name,
+      customer_type: 'Individual',
+      customer_group: 'Individual',
+      territory: 'All Territories',
+    });
+    this.logger.log('Created ERPNext Customer "' + name + '"');
+    return name;
+  }
+
+  async ensureItem(itemCode: string, itemName = itemCode): Promise<void> {
+    try {
+      await this.request('GET', '/api/resource/Item/' + encodeURIComponent(itemCode));
+      return;
+    } catch {
+      /* create below */
+    }
+    await this.request('POST', '/api/resource/Item', {
+      item_code: itemCode,
+      item_name: itemName,
+      item_group: 'Services',
+      stock_item: 0,
+    });
+    this.logger.log('Created ERPNext Item "' + itemCode + '"');
+  }
+
+  async createSalesInvoice(payload: Record<string, unknown>): Promise<string> {
+    const res = (await this.request('POST', '/api/resource/Sales Invoice', payload)) as { name: string };
+    return res.name;
+  }
+
+  async submitSalesInvoice(invoiceName: string): Promise<void> {
+    await this.request('PUT', '/api/resource/Sales Invoice/' + encodeURIComponent(invoiceName), {
+      docstatus: 1,
+    });
+    this.logger.log('Submitted Sales Invoice ' + invoiceName);
+  }
 }

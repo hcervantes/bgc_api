@@ -8,6 +8,7 @@ import { ConfigService } from '@nestjs/config';
 import Stripe from 'stripe';
 import { PrismaService } from '../../common/prisma/prisma.service';
 import { ErpProvisioningService } from '../erpnext/provisioning.service';
+import { ErpInvoiceSyncService } from '../erpnext/invoice-sync.service';
 
 // ─────────────────────────────────────────────────────────────────────────
 // Stripe webhook processing (Phase 1).
@@ -32,6 +33,7 @@ export class StripeWebhookService {
     private readonly prisma: PrismaService,
     private readonly config: ConfigService,
     private readonly provisioning: ErpProvisioningService,
+    private readonly invoiceSync: ErpInvoiceSyncService,
   ) {
     const key = this.config.get<string>('STRIPE_SECRET_KEY');
     if (!key) {
@@ -209,6 +211,25 @@ export class StripeWebhookService {
       where: { stripeSubscriptionId: subscriptionId },
       data: { status: 'active' },
     });
+
+    // ── Phase 2: mirror the paid invoice into the tenant's ERPNext books.
+    // One submitted Sales Invoice per paid Stripe invoice, deduped via the
+    // stripe_invoice_id custom field — safe under Stripe retries.
+    const sub = await this.prisma.stripeSubscription.findFirst({
+      where: { stripeSubscriptionId: subscriptionId },
+      include: { client: true },
+    });
+    const client = sub?.client;
+    if (client?.bookkeepingEnabled && client.erpCompanyName) {
+      await this.invoiceSync.syncPaidInvoice(
+        { erpCompanyName: client.erpCompanyName, slug: client.slug },
+        {
+          id: invoice.id,
+          amountPaidCents: invoice.amount_paid,
+          paidAt: this.toNullableDate(invoice.paid_at ?? invoice.created) ?? new Date(),
+        },
+      );
+    }
   }
 
   private async onInvoicePaymentFailed(invoice: Stripe.Invoice): Promise<void> {
