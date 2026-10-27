@@ -131,6 +131,18 @@ export class ErpPlatformService {
   }
 
 
+
+  /** Create an Account — returns its docname ("Name - ABBR"). */
+  async createAccount(payload: Record<string, unknown>): Promise<string> {
+    const res = (await this.request('POST', '/api/resource/Account', payload)) as {
+      name?: string;
+      data?: { name?: string };
+    };
+    const name = res?.name ?? res?.data?.name;
+    if (!name) throw new Error('Account created but response carried no name: ' + JSON.stringify(res));
+    return name;
+  }
+
   /** Fetch a single doc by doctype/name — null if it does not exist.
    *  Frappe REST gotcha: single-doc GETs wrap the doc in {"data": {...}}
    *  like list GETs do — unwrap or every field read comes back undefined. */

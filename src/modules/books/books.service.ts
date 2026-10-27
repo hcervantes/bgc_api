@@ -1,4 +1,4 @@
-import { BadRequestException, Injectable, Logger, NotFoundException } from '@nestjs/common';
+import { BadRequestException, ConflictException, Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { PrismaService } from '../../common/prisma/prisma.service';
 import { ErpPlatformService } from '../erpnext/erpnext-platform.service';
 import { CreateEntryDto, EntryType } from './create-entry.dto';
@@ -152,6 +152,91 @@ export class BooksService {
       'Portal entry by ' + portalUserId + ' → JE ' + name + ' (' + dto.type + ', ' + rate.toFixed(2) + ', ' + client.erpCompanyName + ')',
     );
     return { journalEntry: name };
+  }
+
+  /**
+   * Customer-created category (phase 4.1): a leaf Account in the tenant's
+   * chart under the type-appropriate group. root_type is inherited from
+   * the parent group, so the new account shows up in listAccounts
+   * automatically.
+   */
+  async createCategory(
+    tenant: { clientId: string },
+    portalUserId: string,
+    dto: { type: string; label: string },
+  ): Promise<{ account: string }> {
+    if (!(dto.type in ROOT_TYPE_BY_ENTRY)) {
+      throw new BadRequestException('type must be expense, income, or asset');
+    }
+    const label = (dto.label ?? '').trim();
+    if (!/^[A-Za-z0-9 &'./-]{1,50}$/.test(label)) {
+      throw new BadRequestException('CATEGORY_LABEL_INVALID');
+    }
+
+    const client = await this.loadTenantBook(tenant);
+    const rootType = ROOT_TYPE_BY_ENTRY[dto.type as EntryType];
+    const abbr = this.abbrFor(client.erpCompanyName);
+
+    // Dedupe on account_name within the Company — same label twice is a
+    // mistake, not two categories.
+    const dupes = await this.erp.listResource<{ name: string }>({
+      doctype: 'Account',
+      filters: [
+        ['Account', 'company', '=', client.erpCompanyName],
+        ['Account', 'account_name', '=', label],
+      ],
+      fields: ['name'],
+      limit: 1,
+    });
+    if (dupes.length > 0) {
+      throw new ConflictException('CATEGORY_EXISTS');
+    }
+
+    // Parent group: assets prefer the Fixed Assets group; everything else
+    // hangs off the chart's top group for its root_type.
+    let parent: string | null = null;
+    if (dto.type === 'asset') {
+      const fixed = await this.erp.getResource<{ name: string }>('Account', 'Fixed Assets - ' + abbr);
+      if (fixed) parent = fixed.name;
+    }
+    if (!parent) {
+      const roots = await this.erp.listResource<{ name: string }>({
+        doctype: 'Account',
+        filters: [
+          ['Account', 'company', '=', client.erpCompanyName],
+          ['Account', 'root_type', '=', rootType],
+          ['Account', 'is_group', '=', 1],
+          ['Account', 'parent_account', 'is', 'not set'],
+        ],
+        fields: ['name'],
+        limit: 1,
+      });
+      parent = roots[0]?.name ?? null;
+    }
+    if (!parent) {
+      throw new NotFoundException('CHART_ROOT_NOT_FOUND');
+    }
+
+    const name = await this.erp.createAccount({
+      account_name: label,
+      company: client.erpCompanyName,
+      parent_account: parent,
+      is_group: 0,
+    });
+
+    await this.prisma.auditLog.create({
+      data: {
+        userId: portalUserId,
+        clientId: client.id,
+        action: 'books.category.created',
+        targetId: name,
+      },
+    });
+
+    this.logger.log(
+      'Portal category "' + label + '" by ' + portalUserId + ' → Account ' + name + ' (under ' + parent + ')',
+    );
+    return { account: name };
   }
 
   async listEntries(tenant: { clientId: string }): Promise<
