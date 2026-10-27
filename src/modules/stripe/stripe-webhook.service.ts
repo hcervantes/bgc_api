@@ -7,6 +7,8 @@ import {
 import { ConfigService } from '@nestjs/config';
 import Stripe from 'stripe';
 import { PrismaService } from '../../common/prisma/prisma.service';
+import { ErpProvisioningService } from '../erpnext/provisioning.service';
+import { ErpInvoiceSyncService } from '../erpnext/invoice-sync.service';
 
 // ─────────────────────────────────────────────────────────────────────────
 // Stripe webhook processing (Phase 1).
@@ -30,6 +32,8 @@ export class StripeWebhookService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly config: ConfigService,
+    private readonly provisioning: ErpProvisioningService,
+    private readonly invoiceSync: ErpInvoiceSyncService,
   ) {
     const key = this.config.get<string>('STRIPE_SECRET_KEY');
     if (!key) {
@@ -166,8 +170,32 @@ export class StripeWebhookService {
       update: { stripeSubscriptionId: sub.id, ...data },
     });
 
-    // TODO(Phase 2): when status === 'active' and no Client is linked,
-    // trigger ERPNext Company + CoA provisioning and set clientId.
+    // ── Phase 2: ERPNext provisioning ──────────────────────────────
+    // First activation provisions the tenant + Company; cancel flips to
+    // cancel-and-retain offboarding; resubscribe re-enables. Idempotent.
+    if (['active', 'trialing'].includes(record.status)) {
+      if (!record.clientId) {
+        const customer = await this.stripe.customers.retrieve(customerId);
+        if (!(customer as { deleted?: boolean }).deleted) {
+          const { name, email } = customer as Stripe.Customer;
+          const clientId = await this.provisioning.provisionForSubscription(
+            {
+              stripeSubscriptionId: record.stripeSubscriptionId,
+              stripeCustomerId: customerId,
+              portalUserId: record.portalUserId,
+            },
+            { name: name ?? null, email: email ?? null },
+          );
+          await this.prisma.stripeSubscription.update({ where: { id: record.id }, data: { clientId } });
+          this.logger.log('Linked subscription ' + sub.id + ' → client ' + clientId);
+        }
+      } else {
+        // Resubscribe after cancel: re-enable the existing tenant.
+        await this.provisioning.setBookkeepingEnabled(record.clientId, true);
+      }
+    } else if (record.status === 'canceled' && record.clientId) {
+      await this.provisioning.setBookkeepingEnabled(record.clientId, false);
+    }
 
     this.logger.log(
       `Subscription ${sub.id} → ${sub.status} (customer ${customerId}, user ${record.portalUserId ?? 'unknown'})`,
@@ -183,6 +211,41 @@ export class StripeWebhookService {
       where: { stripeSubscriptionId: subscriptionId },
       data: { status: 'active' },
     });
+
+    // ── Phase 2: mirror the paid invoice into the tenant's ERPNext books.
+    // One submitted Journal Entry per paid Stripe invoice (expense in the
+    // CLIENT's books), deduped via the stripe_invoice_id custom field —
+    // safe under Stripe retries.
+    const sub = await this.prisma.stripeSubscription.findFirst({
+      where: { stripeSubscriptionId: subscriptionId },
+      include: { client: true },
+    });
+    // invoice.paid routinely arrives BEFORE the customer.subscription.*
+    // events finish provisioning the tenant (observed live: invoice at
+    // +0s, provisioning done at +4s). Fail the event in that window so
+    // Stripe re-delivers it — the dedupe row is deleted on failure and the
+    // retry lands against a fully provisioned tenant. Once the tenant is
+    // provisioned but offboarded (bookkeepingEnabled=false), skip silently.
+    if (!sub || (!sub.clientId && sub.status !== 'canceled')) {
+      throw new Error(
+        'Tenant not yet provisioned for subscription ' + subscriptionId + ' — failing for Stripe retry',
+      );
+    }
+    const client = sub?.client;
+    // stripe@18 2025 typings: resource ids are optional — guard before use.
+    if (client?.bookkeepingEnabled && client.erpCompanyName && invoice.id) {
+      await this.invoiceSync.syncPaidInvoice(
+        { erpCompanyName: client.erpCompanyName, slug: client.slug },
+        {
+          id: invoice.id,
+          // 2025 API: top-level paid_at is gone — it lives on
+          // status_transitions (falling back to created).
+          amountPaidCents: invoice.amount_paid,
+          paidAt:
+            this.toNullableDate(invoice.status_transitions?.paid_at ?? invoice.created) ?? new Date(),
+        },
+      );
+    }
   }
 
   private async onInvoicePaymentFailed(invoice: Stripe.Invoice): Promise<void> {
