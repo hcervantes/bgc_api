@@ -54,15 +54,6 @@ export class BooksService {
       .slice(0, 5);
     return abbr || 'BGC';
   }
-      .toUpperCase()
-      .replace(/[^A-Z0-9 ]/g, '')
-      .split(/\s+/)
-      .filter(Boolean)
-      .map((w) => w[0])
-      .join('')
-      .slice(0, 5);
-    return abbr || 'BGC';
-  }
 
   /** Tenant Client row with bookkeeping live — else anti-enumeration 404.
    *  Separate early throws (not one ||-chain) so TS flow analysis
