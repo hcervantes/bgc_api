@@ -40,9 +40,20 @@ export class BooksService {
     private readonly erp: ErpPlatformService,
   ) {}
 
-  /** Same initials algorithm as provisioning/invoice-sync — deterministic. */
-  private abbrFor(name: string): string {
-    const abbr = name
+  /** Same initials algorithm as provisioning/invoice-sync — deterministic.
+   *  Accepts the nullable erpCompanyName as declared on the Client model;
+   *  loadTenantBook has already rejected a tenant without it. */
+  private abbrFor(name: string | null): string {
+    const abbr = (name ?? '')
+      .toUpperCase()
+      .replace(/[^A-Z0-9 ]/g, '')
+      .split(/\s+/)
+      .filter(Boolean)
+      .map((w) => w[0])
+      .join('')
+      .slice(0, 5);
+    return abbr || 'BGC';
+  }
       .toUpperCase()
       .replace(/[^A-Z0-9 ]/g, '')
       .split(/\s+/)
