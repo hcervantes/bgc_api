@@ -53,11 +53,16 @@ export class BooksService {
     return abbr || 'BGC';
   }
 
-  /** Tenant Client row with bookkeeping live — else anti-enumeration 404. */
+  /** Tenant Client row with bookkeeping live — else anti-enumeration 404.
+   *  Separate early throws (not one ||-chain) so TS flow analysis
+   *  narrows the return to non-null for callers. */
   private async loadTenantBook(tenant: { clientId: string }) {
     const client = await this.prisma.client.findUnique({ where: { id: tenant.clientId } });
-    if (!client?.bookkeepingEnabled || !client.erpCompanyName) {
+    if (!client) {
       // Not an error state to reveal: same 404 as a non-member tenant.
+      throw new NotFoundException('BOOKKEEPING_NOT_ENABLED');
+    }
+    if (!client.bookkeepingEnabled || !client.erpCompanyName) {
       throw new NotFoundException('BOOKKEEPING_NOT_ENABLED');
     }
     return client;
