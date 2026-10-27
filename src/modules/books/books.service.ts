@@ -142,7 +142,9 @@ export class BooksService {
         ['Journal Entry', 'company', '=', client.erpCompanyName],
         ['Journal Entry', 'portal_entry', '=', 1],
       ],
-      fields: ['name', 'posting_date', 'user_remark', 'total', 'docstatus'],
+      // Journal Entry has no "total" field — total_debit is the entry
+      // amount (debit and credit always balance).
+      fields: ['name', 'posting_date', 'user_remark', 'total_debit', 'docstatus'],
       orderBy: 'posting_date desc',
       limit: 50,
     });
@@ -150,7 +152,7 @@ export class BooksService {
       id: je.name as string,
       date: je.posting_date as string,
       description: (je.user_remark as string) ?? '',
-      total: Number(je.total ?? 0),
+      total: Number(je.total_debit ?? 0),
       status: je.docstatus === 1 ? 'submitted' : 'draft',
     }));
   }
