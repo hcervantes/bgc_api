@@ -130,6 +130,68 @@ export class ErpPlatformService {
     this.logger.log('Created Custom Field Journal Entry.stripe_invoice_id');
   }
 
+
+  /** Fetch a single doc by doctype/name — null if it does not exist.
+   *  Frappe REST gotcha: single-doc GETs wrap the doc in {"data": {...}}
+   *  like list GETs do — unwrap or every field read comes back undefined. */
+  async getResource<T = Record<string, unknown>>(doctype: string, name: string): Promise<T | null> {
+    try {
+      const res = (await this.request('GET', '/api/resource/' + encodeURIComponent(doctype) + '/' + encodeURIComponent(name))) as
+        | { data?: T }
+        | T;
+      if (res && typeof res === 'object' && 'data' in (res as Record<string, unknown>)) {
+        return (res as { data?: T }).data ?? null;
+      }
+      return (res as T) ?? null;
+    } catch {
+      return null;
+    }
+  }
+
+  /** Generic list query (tenant books, custom-field lookups, etc.). */
+  async listResource<T = Record<string, unknown>>(opts: {
+    doctype: string;
+    filters: unknown[];
+    fields: string[];
+    orderBy?: string;
+    limit?: number;
+  }): Promise<T[]> {
+    const q =
+      '/api/resource/' +
+      encodeURIComponent(opts.doctype) +
+      '?filters=' +
+      encodeURIComponent(JSON.stringify(opts.filters)) +
+      '&fields=' +
+      encodeURIComponent(JSON.stringify(opts.fields)) +
+      (opts.orderBy ? '&order_by=' + encodeURIComponent(opts.orderBy) : '') +
+      '&limit_page_length=' +
+      (opts.limit ?? 0);
+    const res = (await this.request('GET', q)) as { data?: T[] };
+    return res?.data ?? [];
+  }
+
+  /** Idempotent Custom Field creation (data-plane-wide). */
+  async ensureCustomField(spec: {
+    docname: string; // e.g. "Journal Entry-portal_entry"
+    dt: string;
+    fieldname: string;
+    label: string;
+    fieldtype: string;
+    insertAfter: string;
+  }): Promise<void> {
+    const existing = await this.getResource('Custom Field', spec.docname);
+    if (existing) return;
+    await this.request('POST', '/api/resource/Custom Field', {
+      dt: spec.dt,
+      fieldname: spec.fieldname,
+      label: spec.label,
+      fieldtype: spec.fieldtype,
+      insert_after: spec.insertAfter,
+      read_only: 1,
+    });
+    this.logger.log('Created Custom Field ' + spec.docname);
+  }
+
   async findJournalEntryByStripeId(
     stripeInvoiceId: string,
   ): Promise<{ name: string; docstatus: number } | null> {
