@@ -131,10 +131,18 @@ export class ErpPlatformService {
   }
 
 
-  /** Fetch a single doc by doctype/name — null if it does not exist. */
+  /** Fetch a single doc by doctype/name — null if it does not exist.
+   *  Frappe REST gotcha: single-doc GETs wrap the doc in {"data": {...}}
+   *  like list GETs do — unwrap or every field read comes back undefined. */
   async getResource<T = Record<string, unknown>>(doctype: string, name: string): Promise<T | null> {
     try {
-      return (await this.request('GET', '/api/resource/' + encodeURIComponent(doctype) + '/' + encodeURIComponent(name))) as T;
+      const res = (await this.request('GET', '/api/resource/' + encodeURIComponent(doctype) + '/' + encodeURIComponent(name))) as
+        | { data?: T }
+        | T;
+      if (res && typeof res === 'object' && 'data' in (res as Record<string, unknown>)) {
+        return (res as { data?: T }).data ?? null;
+      }
+      return (res as T) ?? null;
     } catch {
       return null;
     }
