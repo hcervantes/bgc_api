@@ -3,12 +3,21 @@ import { PrismaService } from '../../common/prisma/prisma.service';
 import { ErpPlatformService } from '../erpnext/erpnext-platform.service';
 import { CreateEntryDto, EntryType } from './create-entry.dto';
 
-// Entry type → ERPNext account_type on the tenant's chart.
-const ACCOUNT_TYPE_BY_ENTRY: Record<EntryType, string> = {
-  expense: 'Expense Account',
-  income: 'Income Account',
-  asset: 'Fixed Asset',
+// Entry type → ERPNext root_type on the tenant's chart.
+// root_type is the robust discriminator: EVERY account has one from its
+// position in the chart, whereas account_type is only set on special
+// accounts (Cash/Bank/etc.) — the standard CoA leaves ordinary expense
+// and income accounts untyped, so filtering on account_type yields empty
+// category dropdowns.
+const ROOT_TYPE_BY_ENTRY: Record<EntryType, string> = {
+  expense: 'Expense',
+  income: 'Income',
+  asset: 'Asset',
 };
+
+// Asset categories exclude the company's own liquid/operating accounts —
+// "what your business owns" is equipment, vehicles, etc., not its own cash.
+const ASSET_EXCLUDED_TYPES = ['Cash', 'Bank', 'Receivable', 'Payable', 'Stock'];
 
 /**
  * Phase 4 — Standard-tier customer self-entry.
@@ -55,17 +64,21 @@ export class BooksService {
   }
 
   async listAccounts(tenant: { clientId: string }, type: string): Promise<Array<{ name: string; label: string }>> {
-    if (!(type in ACCOUNT_TYPE_BY_ENTRY)) {
+    if (!(type in ROOT_TYPE_BY_ENTRY)) {
       throw new BadRequestException('type must be expense, income, or asset');
     }
     const client = await this.loadTenantBook(tenant);
+    const filters: unknown[][] = [
+      ['Account', 'company', '=', client.erpCompanyName],
+      ['Account', 'root_type', '=', ROOT_TYPE_BY_ENTRY[type as EntryType]],
+      ['Account', 'is_group', '=', 0],
+    ];
+    if (type === 'asset') {
+      filters.push(['Account', 'account_type', 'not in', ASSET_EXCLUDED_TYPES]);
+    }
     const rows = await this.erp.listResource<{ name: string; account_name: string }>({
       doctype: 'Account',
-      filters: [
-        ['Account', 'company', '=', client.erpCompanyName],
-        ['Account', 'account_type', '=', ACCOUNT_TYPE_BY_ENTRY[type as EntryType]],
-        ['Account', 'is_group', '=', 0],
-      ],
+      filters,
       fields: ['name', 'account_name'],
     });
     return rows.map((a) => ({ name: a.name, label: a.account_name }));
@@ -77,13 +90,22 @@ export class BooksService {
     dto: CreateEntryDto,
   ): Promise<{ journalEntry: string }> {
     const client = await this.loadTenantBook(tenant);
-    const expectedType = ACCOUNT_TYPE_BY_ENTRY[dto.type];
+    const expectedRoot = ROOT_TYPE_BY_ENTRY[dto.type];
 
     // Cross-tenant guarantee: the account must exist AND belong to the
-    // tenant's Company with the expected account_type. Foreign account →
-    // 404 (anti-enumeration), never a write.
-    const account = await this.erp.getResource<{ company?: string; account_type?: string }>('Account', dto.accountName);
-    if (account?.company !== client.erpCompanyName || account?.account_type !== expectedType) {
+    // tenant's Company with the expected root_type (and, for assets, not
+    // be a liquid/operating account). Foreign account → 404
+    // (anti-enumeration), never a write.
+    const account = await this.erp.getResource<{
+      company?: string;
+      root_type?: string;
+      account_type?: string;
+    }>('Account', dto.accountName);
+    if (
+      account?.company !== client.erpCompanyName ||
+      account?.root_type !== expectedRoot ||
+      (dto.type === 'asset' && ASSET_EXCLUDED_TYPES.includes(account.account_type ?? ''))
+    ) {
       throw new NotFoundException('ACCOUNT_NOT_FOUND');
     }
 
