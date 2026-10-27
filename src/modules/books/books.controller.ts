@@ -24,6 +24,16 @@ export class BooksController {
     return this.service.listEntries(req.tenant as { clientId: string });
   }
 
+  /** Customer-created category (Account in the tenant's chart). */
+  @Post('categories')
+  createCategory(
+    @Req() req: Request,
+    @Body() dto: { type: string; label: string },
+    @CurrentUser() user: { sub: string },
+  ) {
+    return this.service.createCategory(req.tenant as { clientId: string }, user.sub, dto);
+  }
+
   @Post('entries')
   create(
     @Req() req: Request,
