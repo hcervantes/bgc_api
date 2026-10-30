@@ -13,6 +13,7 @@ import { Injectable, Logger } from '@nestjs/common';
  *   ERPNEXT_SITE_URL     e.g. http://bgc-dev.localhost
  *   ERPNEXT_API_KEY      service account api_key
  *   ERPNEXT_API_SECRET   service account api_secret
+ *   MILEAGE_RATE_CENTS   IRS standard mileage rate in cents/mile (BooksService)
  * Falls back to the seeded spike credentials if the primary set is absent:
  *   ERPNEXT_SEED_SITE_URL / ERPNEXT_SEED_API_KEY / ERPNEXT_SEED_API_SECRET
  *
@@ -182,6 +183,27 @@ export class ErpPlatformService {
     return res?.data ?? [];
   }
 
+  /** Generic doc create — returns the new docname (unwraps {data} like
+   *  getResource; Frappe wraps POST responses the same way). */
+  async createResource(doctype: string, payload: Record<string, unknown>): Promise<string> {
+    const res = (await this.request('POST', '/api/resource/' + encodeURIComponent(doctype), payload)) as {
+      name?: string;
+      data?: { name?: string };
+    };
+    const name = res?.name ?? res?.data?.name;
+    if (!name) throw new Error(doctype + ' created but response carried no name: ' + JSON.stringify(res));
+    return name;
+  }
+
+  /** Generic doc update (e.g. linking an Odometer Log back to its JE). */
+  async updateResource(doctype: string, name: string, payload: Record<string, unknown>): Promise<void> {
+    await this.request(
+      'PUT',
+      '/api/resource/' + encodeURIComponent(doctype) + '/' + encodeURIComponent(name),
+      payload,
+    );
+  }
+
   /** Idempotent Custom Field creation (data-plane-wide). */
   async ensureCustomField(spec: {
     docname: string; // e.g. "Journal Entry-portal_entry"
@@ -190,17 +212,21 @@ export class ErpPlatformService {
     label: string;
     fieldtype: string;
     insertAfter: string;
+    /** For Link fields only: the target DocType, e.g. "Company". */
+    options?: string;
   }): Promise<void> {
     const existing = await this.getResource('Custom Field', spec.docname);
     if (existing) return;
-    await this.request('POST', '/api/resource/Custom Field', {
+    const payload: Record<string, unknown> = {
       dt: spec.dt,
       fieldname: spec.fieldname,
       label: spec.label,
       fieldtype: spec.fieldtype,
       insert_after: spec.insertAfter,
       read_only: 1,
-    });
+    };
+    if (spec.options) payload.options = spec.options;
+    await this.request('POST', '/api/resource/Custom Field', payload);
     this.logger.log('Created Custom Field ' + spec.docname);
   }
 
@@ -246,6 +272,95 @@ export class ErpPlatformService {
     });
     this.logger.log('Created ERPNext Account "' + accountName + '"');
     return accountName;
+  }
+
+  /**
+   * Phase 4.2 — the tenant's mileage expense account. Created under
+   * Indirect Expenses (same parent as Bookkeeping Fees, which is known to
+   * exist on the standard chart); staff can move it later if they prefer
+   * Direct Expenses.
+   */
+  async ensureMileageAccount(companyName: string, abbr: string): Promise<string> {
+    const accountName = 'Vehicle Expenses - ' + abbr;
+    try {
+      await this.request('GET', '/api/resource/Account/' + encodeURIComponent(accountName));
+      return accountName;
+    } catch {
+      /* create below */
+    }
+    await this.request('POST', '/api/resource/Account', {
+      account_name: 'Vehicle Expenses',
+      company: companyName,
+      parent_account: 'Indirect Expenses - ' + abbr,
+      account_type: 'Expense Account',
+      is_group: 0,
+    });
+    this.logger.log('Created ERPNext Account "' + accountName + '"');
+    return accountName;
+  }
+
+  /**
+   * Phase 4.2 — custom doctypes for odometer-based vehicle tracking.
+   * DECIDED (Oct 30, 2026): odometer replaces manual miles; users log
+   * readings, the system computes miles from the previous reading.
+   * Frappe HR's Vehicle Log was considered and DECLINED (HR app, Employee
+   * + Expense Claim machinery, wrong tenancy fit). "Vehicle" is a free
+   * docname on an ERPNext-only site (the old ERPNext Vehicle doctype moved
+   * into Frappe HR at v14) — if Frappe HR is ever installed, rename.
+   *
+   * Vehicle uses format autoname (VEH-#####) so tenant docnames can never
+   * collide in the global namespace (unlike Customer, which is field-named).
+   * FIRST-RUN VERIFICATION against bgc-dev is part of the PR checklist:
+   * Frappe may demand extra mandatory keys (417 tells you which).
+   */
+  async ensureVehicleDoctypes(): Promise<void> {
+    if (!(await this.getResource('DocType', 'Vehicle'))) {
+      await this.request('POST', '/api/resource/DocType', {
+        name: 'Vehicle',
+        module: 'Core',
+        custom: 1,
+        autoname: 'format:VEH-{#####}',
+        naming_rule: 'Expression',
+        title_field: 'vehicle_name',
+        is_submitable: 0,
+        istable: 0,
+        track_changes: 1,
+        fields: [
+          { fieldname: 'vehicle_name', fieldtype: 'Data', label: 'Vehicle Name', reqd: 1, in_list_view: 1, in_standard_filter: 1 },
+          { fieldname: 'company', fieldtype: 'Link', label: 'Company', reqd: 1, options: 'Company' },
+          { fieldname: 'current_odometer', fieldtype: 'Int', label: 'Current Odometer', read_only: 1 },
+          { fieldname: 'portal_user_id', fieldtype: 'Data', label: 'Portal User', read_only: 1 },
+        ],
+      });
+      this.logger.log('Created custom DocType "Vehicle"');
+    }
+    if (!(await this.getResource('DocType', 'Odometer Log'))) {
+      await this.request('POST', '/api/resource/DocType', {
+        name: 'Odometer Log',
+        module: 'Core',
+        custom: 1,
+        autoname: 'format:ODO-{#####}',
+        naming_rule: 'Expression',
+        title_field: 'purpose',
+        is_submitable: 0,
+        istable: 0,
+        track_changes: 1,
+        fields: [
+          { fieldname: 'vehicle', fieldtype: 'Link', label: 'Vehicle', reqd: 1, options: 'Vehicle', in_list_view: 1, in_standard_filter: 1 },
+          { fieldname: 'vehicle_name', fieldtype: 'Data', label: 'Vehicle Name', read_only: 1, in_list_view: 1 },
+          { fieldname: 'date', fieldtype: 'Date', label: 'Date', reqd: 1, in_list_view: 1 },
+          { fieldname: 'odometer', fieldtype: 'Int', label: 'Odometer', reqd: 1, in_list_view: 1 },
+          { fieldname: 'miles', fieldtype: 'Float', label: 'Miles', read_only: 1, in_list_view: 1 },
+          { fieldname: 'rate', fieldtype: 'Currency', label: 'Rate', read_only: 1 },
+          { fieldname: 'amount', fieldtype: 'Currency', label: 'Amount', read_only: 1 },
+          { fieldname: 'purpose', fieldtype: 'Small Text', label: 'Purpose (business trip)' },
+          { fieldname: 'company', fieldtype: 'Link', label: 'Company', reqd: 1, options: 'Company' },
+          { fieldname: 'portal_user_id', fieldtype: 'Data', label: 'Portal User', read_only: 1 },
+          { fieldname: 'journal_entry', fieldtype: 'Link', label: 'Journal Entry', options: 'Journal Entry', read_only: 1 },
+        ],
+      });
+      this.logger.log('Created custom DocType "Odometer Log"');
+    }
   }
 
   async createJournalEntry(payload: Record<string, unknown>): Promise<string> {
