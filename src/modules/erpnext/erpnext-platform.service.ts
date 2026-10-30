@@ -13,6 +13,7 @@ import { Injectable, Logger } from '@nestjs/common';
  *   ERPNEXT_SITE_URL     e.g. http://bgc-dev.localhost
  *   ERPNEXT_API_KEY      service account api_key
  *   ERPNEXT_API_SECRET   service account api_secret
+ *   MILEAGE_RATE_CENTS   IRS standard mileage rate in cents/mile (BooksService)
  * Falls back to the seeded spike credentials if the primary set is absent:
  *   ERPNEXT_SEED_SITE_URL / ERPNEXT_SEED_API_KEY / ERPNEXT_SEED_API_SECRET
  *
@@ -194,7 +195,7 @@ export class ErpPlatformService {
     return name;
   }
 
-  /** Generic doc update (e.g. linking a Mileage Log back to its JE). */
+  /** Generic doc update (e.g. linking an Odometer Log back to its JE). */
   async updateResource(doctype: string, name: string, payload: Record<string, unknown>): Promise<void> {
     await this.request(
       'PUT',
@@ -299,41 +300,67 @@ export class ErpPlatformService {
   }
 
   /**
-   * Phase 4.2 — custom DocType "Mileage Log" (tenant-scoped by Company).
+   * Phase 4.2 — custom doctypes for odometer-based vehicle tracking.
+   * DECIDED (Oct 30, 2026): odometer replaces manual miles; users log
+   * readings, the system computes miles from the previous reading.
+   * Frappe HR's Vehicle Log was considered and DECLINED (HR app, Employee
+   * + Expense Claim machinery, wrong tenancy fit). "Vehicle" is a free
+   * docname on an ERPNext-only site (the old ERPNext Vehicle doctype moved
+   * into Frappe HR at v14) — if Frappe HR is ever installed, rename.
    *
-   * Creating a DocType over REST needs a valid module — "Core" always
-   * exists — plus custom:1 so it's treated as a custom doctype (survives
-   * patches, listed under Customize Form). autoname format gives
-   * deterministic MLOG-##### docnames we can link from Journal Entries.
+   * Vehicle uses format autoname (VEH-#####) so tenant docnames can never
+   * collide in the global namespace (unlike Customer, which is field-named).
    * FIRST-RUN VERIFICATION against bgc-dev is part of the PR checklist:
-   * Frappe may demand extra mandatory keys in a given version (417 tells
-   * you which, same as Company).
+   * Frappe may demand extra mandatory keys (417 tells you which).
    */
-  async ensureMileageDoctype(): Promise<void> {
-    if (await this.getResource('DocType', 'Mileage Log')) return;
-    await this.request('POST', '/api/resource/DocType', {
-      name: 'Mileage Log',
-      module: 'Core',
-      custom: 1,
-      autoname: 'format:MLOG-{#####}',
-      naming_rule: 'Expression',
-      title_field: 'purpose',
-      is_submitable: 0,
-      istable: 0,
-      track_changes: 1,
-      fields: [
-        { fieldname: 'date', fieldtype: 'Date', label: 'Date', reqd: 1, in_list_view: 1 },
-        { fieldname: 'miles', fieldtype: 'Float', label: 'Miles', reqd: 1, in_list_view: 1 },
-        { fieldname: 'rate', fieldtype: 'Currency', label: 'Rate', reqd: 1 },
-        { fieldname: 'amount', fieldtype: 'Currency', label: 'Amount', in_list_view: 1, read_only: 1 },
-        { fieldname: 'purpose', fieldtype: 'Small Text', label: 'Purpose', reqd: 1 },
-        { fieldname: 'vehicle', fieldtype: 'Data', label: 'Vehicle' },
-        { fieldname: 'company', fieldtype: 'Link', label: 'Company', reqd: 1, options: 'Company' },
-        { fieldname: 'portal_user_id', fieldtype: 'Data', label: 'Portal User', read_only: 1 },
-        { fieldname: 'journal_entry', fieldtype: 'Link', label: 'Journal Entry', options: 'Journal Entry', read_only: 1 },
-      ],
-    });
-    this.logger.log('Created custom DocType "Mileage Log"');
+  async ensureVehicleDoctypes(): Promise<void> {
+    if (!(await this.getResource('DocType', 'Vehicle'))) {
+      await this.request('POST', '/api/resource/DocType', {
+        name: 'Vehicle',
+        module: 'Core',
+        custom: 1,
+        autoname: 'format:VEH-{#####}',
+        naming_rule: 'Expression',
+        title_field: 'vehicle_name',
+        is_submitable: 0,
+        istable: 0,
+        track_changes: 1,
+        fields: [
+          { fieldname: 'vehicle_name', fieldtype: 'Data', label: 'Vehicle Name', reqd: 1, in_list_view: 1, in_standard_filter: 1 },
+          { fieldname: 'company', fieldtype: 'Link', label: 'Company', reqd: 1, options: 'Company' },
+          { fieldname: 'current_odometer', fieldtype: 'Int', label: 'Current Odometer', read_only: 1 },
+          { fieldname: 'portal_user_id', fieldtype: 'Data', label: 'Portal User', read_only: 1 },
+        ],
+      });
+      this.logger.log('Created custom DocType "Vehicle"');
+    }
+    if (!(await this.getResource('DocType', 'Odometer Log'))) {
+      await this.request('POST', '/api/resource/DocType', {
+        name: 'Odometer Log',
+        module: 'Core',
+        custom: 1,
+        autoname: 'format:ODO-{#####}',
+        naming_rule: 'Expression',
+        title_field: 'purpose',
+        is_submitable: 0,
+        istable: 0,
+        track_changes: 1,
+        fields: [
+          { fieldname: 'vehicle', fieldtype: 'Link', label: 'Vehicle', reqd: 1, options: 'Vehicle', in_list_view: 1, in_standard_filter: 1 },
+          { fieldname: 'vehicle_name', fieldtype: 'Data', label: 'Vehicle Name', read_only: 1, in_list_view: 1 },
+          { fieldname: 'date', fieldtype: 'Date', label: 'Date', reqd: 1, in_list_view: 1 },
+          { fieldname: 'odometer', fieldtype: 'Int', label: 'Odometer', reqd: 1, in_list_view: 1 },
+          { fieldname: 'miles', fieldtype: 'Float', label: 'Miles', read_only: 1, in_list_view: 1 },
+          { fieldname: 'rate', fieldtype: 'Currency', label: 'Rate', read_only: 1 },
+          { fieldname: 'amount', fieldtype: 'Currency', label: 'Amount', read_only: 1 },
+          { fieldname: 'purpose', fieldtype: 'Small Text', label: 'Purpose (business trip)' },
+          { fieldname: 'company', fieldtype: 'Link', label: 'Company', reqd: 1, options: 'Company' },
+          { fieldname: 'portal_user_id', fieldtype: 'Data', label: 'Portal User', read_only: 1 },
+          { fieldname: 'journal_entry', fieldtype: 'Link', label: 'Journal Entry', options: 'Journal Entry', read_only: 1 },
+        ],
+      });
+      this.logger.log('Created custom DocType "Odometer Log"');
+    }
   }
 
   async createJournalEntry(payload: Record<string, unknown>): Promise<string> {

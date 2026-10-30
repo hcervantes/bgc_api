@@ -11,6 +11,9 @@ export type EntryType = 'expense' | 'income' | 'asset';
  * Phase 4.2 optional fields:
  * - customerName (income only): full Customer docname, validated against
  *   Customer.portal_company == the tenant's Company, else 404.
+ * - vehicleName (expense/asset only): Vehicle docname — lets fuel,
+ *   maintenance, repairs etc. tie to a specific vehicle; validated against
+ *   the Vehicle's company, else 404.
  * - assetPurchaseDate / assetCostCents (asset only): asset detail stored
  *   on the Journal Entry as custom fields for later reporting.
  */
@@ -36,6 +39,10 @@ export class CreateEntryDto {
   @IsOptional()
   @IsString()
   customerName?: string; // full Customer docname, income entries only
+
+  @IsOptional()
+  @IsString()
+  vehicleName?: string; // Vehicle docname (VEH-#####), expense/asset only
 
   @IsOptional()
   @IsDateString()

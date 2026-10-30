@@ -4,7 +4,7 @@ import { JwtAuthGuard } from '../../common/auth/jwt-auth.guard';
 import { TenantGuard } from '../../common/tenancy/tenant.guard';
 import { CurrentUser } from '../../common/auth/current-user.decorator';
 import { CreateEntryDto } from './create-entry.dto';
-import { CreateMileageDto } from './mileage.dto';
+import { CreateOdometerDto } from './odometer.dto';
 import { BooksService } from './books.service';
 
 /** Tenant-scoped bookkeeping entry endpoints (Standard tier self-entry). */
@@ -35,19 +35,35 @@ export class BooksController {
     return this.service.createCategory(req.tenant as { clientId: string }, user.sub, dto);
   }
 
-  /** Phase 4.2 — logged business trips (auto-posted at the IRS rate). */
-  @Get('mileage')
-  mileage(@Req() req: Request) {
-    return this.service.listMileage(req.tenant as { clientId: string });
+  /** Phase 4.2 — the tenant's vehicles (odometer tracking). */
+  @Get('vehicles')
+  vehicles(@Req() req: Request) {
+    return this.service.listVehicles(req.tenant as { clientId: string });
   }
 
-  @Post('mileage')
-  logMileage(
+  @Post('vehicles')
+  createVehicle(
     @Req() req: Request,
-    @Body() dto: CreateMileageDto,
+    @Body() dto: { name: string },
     @CurrentUser() user: { sub: string },
   ) {
-    return this.service.createMileage(req.tenant as { clientId: string }, user.sub, dto);
+    return this.service.createVehicle(req.tenant as { clientId: string }, user.sub, dto);
+  }
+
+  /** Phase 4.2 — odometer readings; miles are computed from the previous
+   *  reading and a reading WITH a purpose auto-posts the mileage JE. */
+  @Get('odometer')
+  odometer(@Req() req: Request) {
+    return this.service.listOdometer(req.tenant as { clientId: string });
+  }
+
+  @Post('odometer')
+  logOdometer(
+    @Req() req: Request,
+    @Body() dto: CreateOdometerDto,
+    @CurrentUser() user: { sub: string },
+  ) {
+    return this.service.createOdometerReading(req.tenant as { clientId: string }, user.sub, dto);
   }
 
   /** Phase 4.2 — income counterparties (tenant-scoped Customer docs). */

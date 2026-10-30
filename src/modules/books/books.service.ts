@@ -2,7 +2,7 @@ import { BadRequestException, ConflictException, Injectable, Logger, NotFoundExc
 import { PrismaService } from '../../common/prisma/prisma.service';
 import { ErpPlatformService } from '../erpnext/erpnext-platform.service';
 import { CreateEntryDto, EntryType } from './create-entry.dto';
-import { CreateMileageDto } from './mileage.dto';
+import { CreateOdometerDto } from './odometer.dto';
 
 // Entry type → ERPNext root_type on the tenant's chart.
 // root_type is the robust discriminator: EVERY account has one from its
@@ -20,7 +20,7 @@ const ROOT_TYPE_BY_ENTRY: Record<EntryType, string> = {
 // "what your business owns" is equipment, vehicles, etc., not its own cash.
 const ASSET_EXCLUDED_TYPES = ['Cash', 'Bank', 'Receivable', 'Payable', 'Stock'];
 
-// Same label guard as categories — customer names land in docnames.
+// Same label guard as categories — customer/vehicle names land in docnames.
 const NAME_GUARD = /^[A-Za-z0-9 &'./-]{1,50}$/;
 
 /**
@@ -29,19 +29,25 @@ const NAME_GUARD = /^[A-Za-z0-9 &'./-]{1,50}$/;
  * Security model (the cross-tenant guarantee):
  * - The tenant Company name comes ONLY from the authenticated session's
  *   Client row (TenantGuard) — never from the request body.
- * - accountName is resolved against ERPNext and MUST belong to that
- *   Company with the expected account_type; anything else is 404'd as
+ * - accountName / customerName / vehicleName are resolved against ERPNext
+ *   and MUST belong to that Company; anything else is 404'd as
  *   anti-enumeration, exactly like TenantGuard does for client slugs.
  * - Every created Journal Entry is tagged (portal_entry, portal_user_id)
  *   and audited in the AuditLog.
  *
- * Phase 4.2 additions:
- * - Mileage: custom "Mileage Log" doctype rows that AUTO-POST a submitted
- *   JE at the IRS standard mileage rate (rate snapshotted on the row).
+ * Phase 4.2 (odometer revision, Oct 30, 2026):
+ * - Vehicles: custom "Vehicle" doctype, tenant-scoped by company (format
+ *   autoname VEH-##### — no global docname collisions).
+ * - Odometer readings REPLACE manual miles: miles are computed from the
+ *   previous reading per vehicle. First reading = baseline (no JE). A
+ *   reading WITH a purpose = business trip → auto-posted JE at the IRS
+ *   standard rate (rate snapshotted on the row). Reading without purpose =
+ *   plain odometer capture (IRS wants BOY/EOY readings; personal-vs-
+ *   business split deferred).
  * - Customers: ERPNext Customer docs scoped to the tenant via the
- *   portal_company custom field (Customer has NO native Company field —
- *   without that field every tenant shares one global name namespace).
- * - Asset detail: purchase date + cost basis as JE custom fields.
+ *   portal_company custom field (Customer has NO native Company field).
+ * - Expense/asset entries may reference a Vehicle (fuel, maintenance,
+ *   repairs...) via Journal Entry.portal_vehicle_name.
  */
 @Injectable()
 export class BooksService {
@@ -69,8 +75,8 @@ export class BooksService {
 
   /**
    * IRS standard mileage rate in CENTS per mile, from env. The rate is
-   * snapshotted onto each Mileage Log row at entry time, so changing the
-   * env var never rewrites history. Default 70¢ = the last known IRS
+   * snapshotted onto each Odometer Log row at posting time, so changing
+   * the env var never rewrites history. Default 70¢ = the last known IRS
    * business rate — set MILEAGE_RATE_CENTS to the current-year rate.
    */
   private mileageRateCents(): number {
@@ -150,6 +156,19 @@ export class BooksService {
         throw new NotFoundException('CUSTOMER_NOT_FOUND');
       }
     }
+    // Phase 4.2 — expense/asset entries may reference one of the tenant's
+    // Vehicles (fuel, maintenance, repairs...). Foreign vehicle → 404.
+    let vehicleLabel: string | null = null;
+    if (dto.vehicleName) {
+      if (dto.type === 'income') {
+        throw new BadRequestException('VEHICLE_ONLY_FOR_EXPENSE_OR_ASSET');
+      }
+      const vehicle = await this.erp.getResource<{ company?: string; vehicle_name?: string }>('Vehicle', dto.vehicleName);
+      if (vehicle?.company !== client.erpCompanyName) {
+        throw new NotFoundException('VEHICLE_NOT_FOUND');
+      }
+      vehicleLabel = vehicle.vehicle_name ?? dto.vehicleName;
+    }
     // Cross-type guards: customer is income-only, asset detail asset-only.
     if (dto.customerName && dto.type !== 'income') {
       throw new BadRequestException('CUSTOMER_ONLY_FOR_INCOME');
@@ -189,6 +208,9 @@ export class BooksService {
     if (dto.type === 'income' && dto.customerName) {
       payload.portal_customer_name = dto.customerName;
     }
+    if (vehicleLabel) {
+      payload.portal_vehicle_name = vehicleLabel;
+    }
     if (dto.type === 'asset') {
       if (dto.assetPurchaseDate) payload.portal_asset_purchase_date = dto.assetPurchaseDate;
       if (dto.assetCostCents) payload.portal_asset_cost = dto.assetCostCents / 100;
@@ -212,106 +234,266 @@ export class BooksService {
     return { journalEntry: name };
   }
 
-  /**
-   * Phase 4.2 — log a business trip. DECIDED (Oct 2026): mileage
-   * AUTO-POSTS a submitted Journal Entry at the IRS standard rate at log
-   * time. Flow: Mileage Log row (rate snapshotted) → JE (debit Vehicle
-   * Expenses, credit Cash) → link both ways → audit.
-   *
-   * Failure between the log insert and the JE submit leaves a log row
-   * with an empty journal_entry — visible in listMileage so staff can see
-   * it; the portal double-submit guard keeps this a rare path.
-   */
-  async createMileage(
+  // ── Phase 4.2: Vehicles (tenant-scoped custom doctype) ─────────────────
+
+  async createVehicle(
     tenant: { clientId: string },
     portalUserId: string,
-    dto: CreateMileageDto,
-  ): Promise<{ mileageLog: string; journalEntry: string; amountCents: number }> {
-    const client = await this.loadTenantBook(tenant);
-    const rateCents = this.mileageRateCents();
-    const amountCents = Math.round(dto.miles * rateCents);
-    if (amountCents <= 0) {
-      throw new BadRequestException('MILES_INVALID');
+    dto: { name: string },
+  ): Promise<{ vehicle: string; label: string }> {
+    const label = (dto.name ?? '').trim();
+    if (!NAME_GUARD.test(label)) {
+      throw new BadRequestException('VEHICLE_NAME_INVALID');
     }
-    const abbr = this.abbrFor(client.erpCompanyName);
+    const client = await this.loadTenantBook(tenant);
+    await this.erp.ensureVehicleDoctypes();
 
-    await this.erp.ensureMileageDoctype();
+    // Per-Company label dedupe — two vehicles with the same name in one
+    // tenant is a mistake. (Docnames never collide: format autoname.)
+    const dupes = await this.erp.listResource<{ name: string }>({
+      doctype: 'Vehicle',
+      filters: [
+        ['Vehicle', 'company', '=', client.erpCompanyName],
+        ['Vehicle', 'vehicle_name', '=', label],
+      ],
+      fields: ['name'],
+      limit: 1,
+    });
+    if (dupes.length > 0) {
+      throw new ConflictException('VEHICLE_EXISTS');
+    }
+
+    const name = await this.erp.createResource('Vehicle', {
+      vehicle_name: label,
+      company: client.erpCompanyName,
+      current_odometer: 0,
+      portal_user_id: portalUserId,
+    });
+
+    await this.prisma.auditLog.create({
+      data: {
+        userId: portalUserId,
+        clientId: client.id,
+        action: 'books.vehicle.created',
+        targetId: name,
+      },
+    });
+
+    this.logger.log('Portal vehicle "' + label + '" by ' + portalUserId + ' → Vehicle ' + name);
+    return { vehicle: name, label };
+  }
+
+  async listVehicles(
+    tenant: { clientId: string },
+  ): Promise<Array<{ name: string; label: string; currentOdometer: number }>> {
+    const client = await this.loadTenantBook(tenant);
+    const rows = await this.erp.listResource<{ name: string; vehicle_name: string; current_odometer?: number }>({
+      doctype: 'Vehicle',
+      filters: [['Vehicle', 'company', '=', client.erpCompanyName]],
+      fields: ['name', 'vehicle_name', 'current_odometer'],
+      orderBy: 'creation desc',
+      limit: 100,
+    });
+    return rows.map((v) => ({
+      name: v.name,
+      label: v.vehicle_name,
+      currentOdometer: Number(v.current_odometer ?? 0),
+    }));
+  }
+
+  // ── Phase 4.2: Odometer readings (miles computed, not entered) ─────────
+
+  /**
+   * Log an odometer reading for a vehicle.
+   * - FIRST reading for the vehicle = BASELINE: recorded, no miles, no JE.
+   * - Reading must exceed the previous one (400 ODOMETER_NOT_INCREASING).
+   * - purpose present → business trip: miles = reading − previous, JE
+   *   auto-posted at the IRS rate (debit Vehicle Expenses, credit Cash).
+   * - purpose absent → reading-only row (BOY/EOY odometer capture), no JE.
+   */
+  async createOdometerReading(
+    tenant: { clientId: string },
+    portalUserId: string,
+    dto: CreateOdometerDto,
+  ): Promise<{
+    baseline: boolean;
+    odometerLog: string;
+    miles: number;
+    journalEntry: string | null;
+    amountCents: number | null;
+  }> {
+    const client = await this.loadTenantBook(tenant);
+    await this.erp.ensureVehicleDoctypes();
+
+    // Cross-tenant guarantee: the vehicle must belong to this tenant.
+    const vehicle = await this.erp.getResource<{ company?: string; vehicle_name?: string }>('Vehicle', dto.vehicle);
+    if (vehicle?.company !== client.erpCompanyName) {
+      throw new NotFoundException('VEHICLE_NOT_FOUND');
+    }
+    const vehicleLabel = vehicle.vehicle_name ?? dto.vehicle;
+
+    // Previous reading for this vehicle (latest by date, then creation).
+    const prevRows = await this.erp.listResource<{ odometer?: number }>({
+      doctype: 'Odometer Log',
+      filters: [['Odometer Log', 'vehicle', '=', dto.vehicle]],
+      fields: ['odometer'],
+      orderBy: 'date desc, creation desc',
+      limit: 1,
+    });
+    const prevOdometer = prevRows.length > 0 ? Number(prevRows[0].odometer ?? 0) : null;
+
+    const purpose = dto.purpose?.trim() || undefined;
+
+    // Baseline: first reading ever recorded for this vehicle.
+    if (prevOdometer === null) {
+      const log = await this.erp.createResource('Odometer Log', {
+        vehicle: dto.vehicle,
+        vehicle_name: vehicleLabel,
+        date: dto.date,
+        odometer: dto.odometer,
+        miles: 0,
+        rate: 0,
+        amount: 0,
+        purpose: purpose ?? '',
+        company: client.erpCompanyName,
+        portal_user_id: portalUserId,
+      });
+      await this.erp.updateResource('Vehicle', dto.vehicle, { current_odometer: dto.odometer });
+      await this.prisma.auditLog.create({
+        data: {
+          userId: portalUserId,
+          clientId: client.id,
+          action: 'books.odometer.baseline',
+          targetId: log,
+        },
+      });
+      this.logger.log('Baseline odometer ' + dto.odometer + ' for ' + dto.vehicle + ' by ' + portalUserId);
+      return { baseline: true, odometerLog: log, miles: 0, journalEntry: null, amountCents: null };
+    }
+
+    if (dto.odometer <= prevOdometer) {
+      throw new BadRequestException('ODOMETER_NOT_INCREASING');
+    }
+    const miles = dto.odometer - prevOdometer;
+    const trip = { ...dto, purpose };
+
+    // Reading-only row: no JE, but still record the computed miles (the
+    // diff is needed for BOY/EOY totals).
+    if (!purpose) {
+      const log = await this.erp.createResource('Odometer Log', {
+        vehicle: dto.vehicle,
+        vehicle_name: vehicleLabel,
+        date: dto.date,
+        odometer: dto.odometer,
+        miles,
+        rate: 0,
+        amount: 0,
+        purpose: '',
+        company: client.erpCompanyName,
+        portal_user_id: portalUserId,
+      });
+      await this.erp.updateResource('Vehicle', dto.vehicle, { current_odometer: dto.odometer });
+      await this.prisma.auditLog.create({
+        data: {
+          userId: portalUserId,
+          clientId: client.id,
+          action: 'books.odometer.recorded',
+          targetId: log,
+        },
+      });
+      this.logger.log('Odometer ' + dto.odometer + ' (' + miles + ' mi) for ' + dto.vehicle + ' by ' + portalUserId + ' — no JE (reading only)');
+      return { baseline: false, odometerLog: log, miles, journalEntry: null, amountCents: null };
+    }
+
+    // Business trip → auto-post the JE at the IRS rate (DECIDED Oct 2026).
+    const rateCents = this.mileageRateCents();
+    const amountCents = Math.round(miles * rateCents);
+    const abbr = this.abbrFor(client.erpCompanyName);
     const vehicleAccount = await this.erp.ensureMileageAccount(client.erpCompanyName, abbr);
     await this.ensurePortalCustomFields();
 
-    const log = await this.erp.createResource('Mileage Log', {
-      date: dto.date,
-      miles: dto.miles,
+    const log = await this.erp.createResource('Odometer Log', {
+      vehicle: dto.vehicle,
+      vehicle_name: vehicleLabel,
+      date: trip.date,
+      odometer: trip.odometer,
+      miles,
       rate: rateCents / 100,
       amount: amountCents / 100,
-      purpose: dto.purpose,
-      vehicle: dto.vehicle ?? '',
+      purpose,
       company: client.erpCompanyName,
       portal_user_id: portalUserId,
     });
 
     const name = await this.erp.createJournalEntry({
       company: client.erpCompanyName,
-      posting_date: dto.date,
+      posting_date: trip.date,
       voucher_type: 'Journal Entry',
-      user_remark: 'Mileage: ' + dto.miles + ' mi — ' + dto.purpose,
+      user_remark: 'Mileage (' + vehicleLabel + '): ' + miles + ' mi — ' + purpose,
       portal_entry: 1,
       portal_user_id: portalUserId,
-      mileage_log: log,
+      odometer_log: log,
       accounts: [
         { account: vehicleAccount, debit_in_account_currency: amountCents / 100, credit_in_account_currency: 0 },
         { account: 'Cash - ' + abbr, debit_in_account_currency: 0, credit_in_account_currency: amountCents / 100 },
       ],
     });
     await this.erp.submitJournalEntry(name);
-    await this.erp.updateResource('Mileage Log', log, { journal_entry: name });
+    await this.erp.updateResource('Odometer Log', log, { journal_entry: name });
+    await this.erp.updateResource('Vehicle', dto.vehicle, { current_odometer: trip.odometer });
 
     await this.prisma.auditLog.create({
       data: {
         userId: portalUserId,
         clientId: client.id,
-        action: 'books.mileage.created',
+        action: 'books.odometer.created',
         targetId: name,
       },
     });
 
     this.logger.log(
-      'Mileage by ' + portalUserId + ' → MLOG ' + log + ' / JE ' + name + ' (' + dto.miles + ' mi × ' + (rateCents / 100).toFixed(2) + ')',
+      'Odometer trip by ' + portalUserId + ' → ODO ' + log + ' / JE ' + name + ' (' + miles + ' mi × ' + (rateCents / 100).toFixed(2) + ')',
     );
-    return { mileageLog: log, journalEntry: name, amountCents };
+    return { baseline: false, odometerLog: log, miles, journalEntry: name, amountCents };
   }
 
-  async listMileage(tenant: { clientId: string }): Promise<
+  async listOdometer(tenant: { clientId: string }): Promise<
     Array<{
       id: string;
+      vehicle: string;
+      vehicleName: string;
       date: string;
+      odometer: number;
       miles: number;
       rate: number;
       amount: number;
       purpose: string;
-      vehicle: string;
       journalEntry: string | null;
     }>
   > {
     const client = await this.loadTenantBook(tenant);
     const rows = await this.erp.listResource<Record<string, unknown>>({
-      doctype: 'Mileage Log',
-      filters: [['Mileage Log', 'company', '=', client.erpCompanyName]],
-      fields: ['name', 'date', 'miles', 'rate', 'amount', 'purpose', 'vehicle', 'journal_entry'],
-      orderBy: 'date desc',
+      doctype: 'Odometer Log',
+      filters: [['Odometer Log', 'company', '=', client.erpCompanyName]],
+      fields: ['name', 'vehicle', 'vehicle_name', 'date', 'odometer', 'miles', 'rate', 'amount', 'purpose', 'journal_entry'],
+      orderBy: 'date desc, creation desc',
       limit: 50,
     });
     return rows.map((m) => ({
       id: m.name as string,
+      vehicle: (m.vehicle as string) ?? '',
+      vehicleName: (m.vehicle_name as string) ?? '',
       date: (m.date as string) ?? '',
+      odometer: Number(m.odometer ?? 0),
       miles: Number(m.miles ?? 0),
       rate: Number(m.rate ?? 0),
       amount: Number(m.amount ?? 0),
       purpose: (m.purpose as string) ?? '',
-      vehicle: (m.vehicle as string) ?? '',
       journalEntry: (m.journal_entry as string) ?? null,
     }));
   }
+
+  // ── Phase 4.2: Customers (income counterparties) ───────────────────────
 
   /**
    * Phase 4.2 — a Customer the tenant bills for income. Customer has no
@@ -544,9 +726,15 @@ export class BooksService {
         fieldtype: 'Data',
       },
       {
-        docname: 'Journal Entry-mileage_log',
-        fieldname: 'mileage_log',
-        label: 'Mileage Log',
+        docname: 'Journal Entry-portal_vehicle_name',
+        fieldname: 'portal_vehicle_name',
+        label: 'Portal Vehicle',
+        fieldtype: 'Data',
+      },
+      {
+        docname: 'Journal Entry-odometer_log',
+        fieldname: 'odometer_log',
+        label: 'Odometer Log',
         fieldtype: 'Data',
       },
       {
