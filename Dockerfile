@@ -11,8 +11,12 @@ RUN apk add --no-cache openssl
 COPY package*.json ./
 RUN npm ci --no-audit --no-fund
 COPY . .
-# prisma generate BEFORE nest build so the generated client is present
-RUN npx prisma generate && npm run build
+# prisma generate BEFORE nest build so the generated client is present.
+# rm the tsbuildinfo FIRST: nest-cli deletes dist/ (deleteOutDir), but tsc's
+# incremental state (tsconfig.tsbuildinfo, copied in via the context if not
+# dockerignored) then claims everything is up-to-date and emits NOTHING —
+# a "successful" build with an empty dist/ (seen live Oct 30, 2026).
+RUN rm -f tsconfig.tsbuildinfo && npx prisma generate && npm run build
 
 # Stage 2: serve
 FROM node:22-alpine
