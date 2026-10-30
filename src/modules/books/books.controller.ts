@@ -4,6 +4,7 @@ import { JwtAuthGuard } from '../../common/auth/jwt-auth.guard';
 import { TenantGuard } from '../../common/tenancy/tenant.guard';
 import { CurrentUser } from '../../common/auth/current-user.decorator';
 import { CreateEntryDto } from './create-entry.dto';
+import { CreateMileageDto } from './mileage.dto';
 import { BooksService } from './books.service';
 
 /** Tenant-scoped bookkeeping entry endpoints (Standard tier self-entry). */
@@ -32,6 +33,36 @@ export class BooksController {
     @CurrentUser() user: { sub: string },
   ) {
     return this.service.createCategory(req.tenant as { clientId: string }, user.sub, dto);
+  }
+
+  /** Phase 4.2 — logged business trips (auto-posted at the IRS rate). */
+  @Get('mileage')
+  mileage(@Req() req: Request) {
+    return this.service.listMileage(req.tenant as { clientId: string });
+  }
+
+  @Post('mileage')
+  logMileage(
+    @Req() req: Request,
+    @Body() dto: CreateMileageDto,
+    @CurrentUser() user: { sub: string },
+  ) {
+    return this.service.createMileage(req.tenant as { clientId: string }, user.sub, dto);
+  }
+
+  /** Phase 4.2 — income counterparties (tenant-scoped Customer docs). */
+  @Get('customers')
+  customers(@Req() req: Request) {
+    return this.service.listCustomers(req.tenant as { clientId: string });
+  }
+
+  @Post('customers')
+  createCustomer(
+    @Req() req: Request,
+    @Body() dto: { name: string },
+    @CurrentUser() user: { sub: string },
+  ) {
+    return this.service.createCustomer(req.tenant as { clientId: string }, user.sub, dto);
   }
 
   @Post('entries')
