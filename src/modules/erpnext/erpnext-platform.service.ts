@@ -325,11 +325,14 @@ export class ErpPlatformService {
    *
    * "Odometer Log" IS ours (custom DocType, module Core) and is created
    * here. FRAPPE GOTCHA (bgc-dev, Nov 2): a DocType created via REST with
-   * NO permissions array gets ZERO role permissions — even System
-   * Manager then gets 403 "Insufficient Permission" on every read. The
-   * create payload therefore ships a System Manager permission row, and
-   * the self-heal below patches doctypes created by the earlier payload
-   * (e.g. bgc-dev) that have none.
+   * NO permissions array gets ZERO role permissions — even System Manager
+   * then gets 403 "Insufficient Permission" on every read. The create
+   * payload therefore ships a System Manager permission row, and the
+   * self-heal below patches doctypes created by the earlier payload
+   * (e.g. bgc-dev) that have none. THE SAME applies to the NATIVE Vehicle
+   * doctype: it ships with an empty permission table (rarely-used e-Way
+   * Bill doctype) — System Manager 403s on it too until a perm row is
+   * granted (append-only, never replace native perms).
    */
   async ensureVehicleDoctypes(): Promise<void> {
     this.vehicleDoctypesEnsure ??= this.doEnsureVehicleDoctypes().catch((err) => {
@@ -342,6 +345,25 @@ export class ErpPlatformService {
   }
 
   private async doEnsureVehicleDoctypes(): Promise<void> {
+    // The NATIVE Vehicle doctype (module Setup) ships with an EMPTY
+    // permission table — it's a rarely-used e-Way Bill doctype, and with
+    // no DocPerm rows even System Manager gets 403 "Insufficient
+    // Permission" on every Vehicle read/write (bgc-dev, Nov 2). We must
+    // never create or drop the doctype itself, but granting System
+    // Manager a permission row is safe and required. PUT with the FULL
+    // permissions array (existing rows + ours) — a partial array would
+    // REPLACE the child table and wipe native perms.
+    const vehicleDt = await this.getResource<{ permissions?: Array<Record<string, unknown>> }>('DocType', 'Vehicle');
+    if (vehicleDt && !(vehicleDt.permissions ?? []).some((p) => (p as { role?: string }).role === 'System Manager')) {
+      await this.updateResource('DocType', 'Vehicle', {
+        permissions: [
+          ...(vehicleDt.permissions ?? []),
+          { role: 'System Manager', read: 1, write: 1, create: 1, delete: 1, report: 1, share: 1 },
+        ],
+      });
+      this.logger.log('Granted System Manager permissions on native "Vehicle" doctype (shipped with none)');
+    }
+
     // Ride on the NATIVE Vehicle doctype — label custom field only.
     await this.ensureCustomField({
       docname: 'Vehicle-portal_vehicle_name',
