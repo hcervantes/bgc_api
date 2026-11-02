@@ -57,6 +57,9 @@ const NAME_GUARD = /^[A-Za-z0-9 &'./-]{1,50}$/;
 export class BooksService {
   private readonly logger = new Logger(BooksService.name);
 
+  /** One-shot memo for ensureBooksMeta — reset on failure (see there). */
+  private booksMetaEnsure: Promise<void> | null = null;
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly erp: ErpPlatformService,
@@ -104,6 +107,36 @@ export class BooksService {
       throw new NotFoundException('BOOKKEEPING_NOT_ENABLED');
     }
     return client;
+  }
+
+  /**
+   * ONE-SHOT per process: every custom field + custom doctype the books
+   * READ paths query. FRAPPE GOTCHA (bgc-dev, Nov 2): a list that
+   * filters/returns a custom field which does not exist yet 417s with
+   * "Field not permitted in query" — the write paths ensured everything
+   * lazily, but on a fresh site the very first request is a page-load GET.
+   * Memoized so the ensure roundtrips run once per process, not per
+   * request; the memo resets on failure so a transient ERPNext outage
+   * isn't cached as a permanent rejection.
+   */
+  private ensureBooksMeta(): Promise<void> {
+    this.booksMetaEnsure ??= (async () => {
+      await this.erp.ensureVehicleDoctypes();
+      await this.erp.ensureCustomField({
+        docname: 'Customer-portal_company',
+        dt: 'Customer',
+        fieldname: 'portal_company',
+        label: 'Portal Company',
+        fieldtype: 'Link',
+        options: 'Company',
+        insertAfter: 'customer_group',
+      });
+      await this.ensurePortalCustomFields();
+    })().catch((err) => {
+      this.booksMetaEnsure = null;
+      throw err;
+    });
+    return this.booksMetaEnsure;
   }
 
   async listAccounts(tenant: { clientId: string }, type: string): Promise<Array<{ name: string; label: string }>> {
@@ -181,7 +214,7 @@ export class BooksService {
       throw new BadRequestException('ASSET_DETAIL_ONLY_FOR_ASSETS');
     }
 
-    await this.ensurePortalCustomFields();
+    await this.ensureBooksMeta();
 
     const rate = dto.amountCents / 100; // exact cents → 2-decimal
     const abbr = this.abbrFor(client.erpCompanyName);
@@ -297,6 +330,9 @@ export class BooksService {
     tenant: { clientId: string },
   ): Promise<Array<{ name: string; label: string; currentOdometer: number }>> {
     const client = await this.loadTenantBook(tenant);
+    // portal_vehicle_name doesn't exist on a fresh site until the first
+    // ensure — a list querying it would 417. Ensure (memoized) first.
+    await this.ensureBooksMeta();
     const rows = await this.erp.listResource<{ name: string; portal_vehicle_name?: string; last_odometer?: number }>({
       doctype: 'Vehicle',
       filters: [['Vehicle', 'company', '=', client.erpCompanyName]],
@@ -419,7 +455,7 @@ export class BooksService {
     const amountCents = Math.round(miles * rateCents);
     const abbr = this.abbrFor(client.erpCompanyName);
     const vehicleAccount = await this.erp.ensureMileageAccount(client.erpCompanyName, abbr);
-    await this.ensurePortalCustomFields();
+    await this.ensureBooksMeta();
 
     const log = await this.erp.createResource('Odometer Log', {
       vehicle: dto.vehicle,
@@ -481,6 +517,9 @@ export class BooksService {
     }>
   > {
     const client = await this.loadTenantBook(tenant);
+    // "Odometer Log" doesn't exist (and its permissions aren't patched)
+    // on a fresh site until the first ensure — ensure (memoized) first.
+    await this.ensureBooksMeta();
     const rows = await this.erp.listResource<Record<string, unknown>>({
       doctype: 'Odometer Log',
       filters: [['Odometer Log', 'company', '=', client.erpCompanyName]],
@@ -529,15 +568,8 @@ export class BooksService {
       throw new NotFoundException('BOOKKEEPING_NOT_ENABLED');
     }
 
-    await this.erp.ensureCustomField({
-      docname: 'Customer-portal_company',
-      dt: 'Customer',
-      fieldname: 'portal_company',
-      label: 'Portal Company',
-      fieldtype: 'Link',
-      options: 'Company',
-      insertAfter: 'customer_group',
-    });
+    // Customer.portal_company (also ensured by the memoized meta path).
+    await this.ensureBooksMeta();
 
     // Same label, same tenant → 409. Same label, FOREIGN tenant owns the
     // docname → namespace ours with the abbr instead of failing.
@@ -600,6 +632,9 @@ export class BooksService {
 
   async listCustomers(tenant: { clientId: string }): Promise<Array<{ name: string }>> {
     const client = await this.loadTenantBook(tenant);
+    // Customer.portal_company doesn't exist on a fresh site until the
+    // first ensure — a list filtering on it would 417. Memoized first.
+    await this.ensureBooksMeta();
     const rows = await this.erp.listResource<{ name: string }>({
       doctype: 'Customer',
       filters: [['Customer', 'portal_company', '=', client.erpCompanyName]],
@@ -699,6 +734,9 @@ export class BooksService {
     Array<{ id: string; date: string; description: string; total: number; status: string }>
   > {
     const client = await this.loadTenantBook(tenant);
+    // Journal Entry.portal_entry doesn't exist on a fresh site until the
+    // first ensure — a list filtering on it would 417. Memoized first.
+    await this.ensureBooksMeta();
     const rows = await this.erp.listResource<Record<string, unknown>>({
       doctype: 'Journal Entry',
       filters: [

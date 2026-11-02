@@ -25,6 +25,10 @@ import { Injectable, Logger } from '@nestjs/common';
 export class ErpPlatformService {
   private readonly logger = new Logger(ErpPlatformService.name);
 
+  /** Memo for ensureVehicleDoctypes — reset on failure so a transient
+   *  ERPNext outage never poisons the process with a cached rejection. */
+  private vehicleDoctypesEnsure: Promise<void> | null = null;
+
   private creds(): { siteUrl: string; auth: string } {
     const siteUrl = (process.env.ERPNEXT_SITE_URL ?? process.env.ERPNEXT_SEED_SITE_URL)?.replace(/\/$/, '');
     const apiKey = process.env.ERPNEXT_API_KEY ?? process.env.ERPNEXT_SEED_API_KEY;
@@ -130,8 +134,6 @@ export class ErpPlatformService {
     });
     this.logger.log('Created Custom Field Journal Entry.stripe_invoice_id');
   }
-
-
 
   /** Create an Account — returns its docname ("Name - ABBR"). */
   async createAccount(payload: Record<string, unknown>): Promise<string> {
@@ -300,7 +302,10 @@ export class ErpPlatformService {
   }
 
   /**
-   * Phase 4.2 — vehicle tracking setup.
+   * Phase 4.2 — vehicle tracking setup. MEMOIZED per process (reset on
+   * failure): every books read path calls this before its first query,
+   * so the roundtrips must not repeat on every request.
+   *
    * DECIDED (Oct 30, 2026): odometer replaces manual miles; users log
    * readings, the system computes miles from the previous reading.
    * Frappe HR's Vehicle Log was considered and DECLINED (HR app, Employee
@@ -319,11 +324,24 @@ export class ErpPlatformService {
    * pattern as Customer.
    *
    * "Odometer Log" IS ours (custom DocType, module Core) and is created
-   * here. FIRST-RUN VERIFICATION against bgc-dev is part of the PR
-   * checklist (Frappe may demand extra mandatory keys — 417 tells you
-   * which).
+   * here. FRAPPE GOTCHA (bgc-dev, Nov 2): a DocType created via REST with
+   * NO permissions array gets ZERO role permissions — even System
+   * Manager then gets 403 "Insufficient Permission" on every read. The
+   * create payload therefore ships a System Manager permission row, and
+   * the self-heal below patches doctypes created by the earlier payload
+   * (e.g. bgc-dev) that have none.
    */
   async ensureVehicleDoctypes(): Promise<void> {
+    this.vehicleDoctypesEnsure ??= this.doEnsureVehicleDoctypes().catch((err) => {
+      // Don't cache a rejection: ERPNext being briefly down at first
+      // call must not 500 every books request for the process lifetime.
+      this.vehicleDoctypesEnsure = null;
+      throw err;
+    });
+    return this.vehicleDoctypesEnsure;
+  }
+
+  private async doEnsureVehicleDoctypes(): Promise<void> {
     // Ride on the NATIVE Vehicle doctype — label custom field only.
     await this.ensureCustomField({
       docname: 'Vehicle-portal_vehicle_name',
@@ -333,7 +351,21 @@ export class ErpPlatformService {
       fieldtype: 'Data',
       insertAfter: 'model',
     });
-    if (!(await this.getResource('DocType', 'Odometer Log'))) {
+
+    const ODOMETER_LOG_PERMS = [
+      {
+        role: 'System Manager',
+        read: 1,
+        write: 1,
+        create: 1,
+        delete: 1,
+        report: 1,
+        share: 1,
+      },
+    ];
+
+    const dt = await this.getResource<{ permissions?: Array<{ role?: string }> }>('DocType', 'Odometer Log');
+    if (!dt) {
       await this.request('POST', '/api/resource/DocType', {
         name: 'Odometer Log',
         module: 'Core',
@@ -344,6 +376,7 @@ export class ErpPlatformService {
         is_submitable: 0,
         istable: 0,
         track_changes: 1,
+        permissions: ODOMETER_LOG_PERMS,
         fields: [
           { fieldname: 'vehicle', fieldtype: 'Link', label: 'Vehicle', reqd: 1, options: 'Vehicle', in_list_view: 1, in_standard_filter: 1 },
           { fieldname: 'vehicle_name', fieldtype: 'Data', label: 'Vehicle Name', read_only: 1, in_list_view: 1 },
@@ -359,6 +392,16 @@ export class ErpPlatformService {
         ],
       });
       this.logger.log('Created custom DocType "Odometer Log"');
+      return;
+    }
+
+    // Self-heal: doctypes created before the permissions fix (bgc-dev)
+    // have no role rows at all → 403 for everyone, System Manager
+    // included. PUT with a permissions array replaces the child table.
+    const hasSysManager = (dt.permissions ?? []).some((p) => p.role === 'System Manager');
+    if (!hasSysManager) {
+      await this.updateResource('DocType', 'Odometer Log', { permissions: ODOMETER_LOG_PERMS });
+      this.logger.log('Patched "Odometer Log" with System Manager permissions (created without any)');
     }
   }
 
