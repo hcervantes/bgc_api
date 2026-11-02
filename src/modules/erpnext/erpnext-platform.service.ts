@@ -346,12 +346,23 @@ export class ErpPlatformService {
    *     mode (417 CannotCreateStandardDoctypeError) — the DocType PUT
    *     trick only works for CUSTOM doctypes.
    *  4. frappe.permissions.add_permission is NOT whitelisted (403 via
-   *     /api/method). The REST-legal route is the "Custom DocPerm"
-   *     doctype — Frappe's own mechanism for layering extra permissions
-   *     onto standard doctypes without developer mode. ensureNativeVehicle
-   *     Permission probes first, creates the Custom DocPerm if missing,
-   *     re-probes, and fails with the bench-console one-liner if the
-   *     site still refuses.
+   *     /api/method). The REST-legal route is the Role Permission
+   *     Manager backend: frappe.core.page.permission_manager.
+   *     permission_manager add/update ARE whitelisted (System Manager
+   *     only) and drive "Custom DocPerm" rows — Frappe's own mechanism
+   *     for layering extra permissions onto standard doctypes without
+   *     developer mode.
+   *  5. v16 add_permission(doctype, role, permlevel, ptype="read") sets
+   *     ONE ptype only (default read), and if a Custom DocPerm row
+   *     already exists it "already exists"-no-ops WITHOUT touching its
+   *     flags. So a bench add_permission("Vehicle", "System Manager")
+   *     leaves the row with read=1 and nothing else — lists work,
+   *     creates still 403 (bgc-dev, Nov 2). The whitelisted
+   *     permission_manager.update(doctype, role, permlevel, ptype,
+   *     value) is the ONLY whitelisted path that rewrites an existing
+   *     row's flags (and it registers frappe.clear_cache(doctype=...)
+   *     after commit). ensureNativeVehiclePermission therefore runs add
+   *     (row creation) + update per ptype (flag repair), then re-probes.
    */
   async ensureVehicleDoctypes(): Promise<void> {
     this.vehicleDoctypesEnsure ??= this.doEnsureVehicleDoctypes().catch((err) => {
@@ -375,43 +386,51 @@ export class ErpPlatformService {
 
   /**
    * Grant System Manager access to the NATIVE Vehicle doctype. It ships
-   * with an empty permission table, and every direct route to its DocPerm
-   * child table is blocked for the REST user (no developer mode; the
-   * permission method not whitelisted) — so the grant rides on a
-   * "Custom DocPerm" row, which Frappe merges into the doctype's runtime
-   * permissions. Probes before/after; if the site still refuses, throws
-   * with the bench-console fix so ops isn't left guessing.
+   * with an empty permission table; the direct routes are all blocked for
+   * the REST user (no developer mode for the DocType PUT; the internal
+   * frappe.permissions methods not whitelisted) — so the grant rides on
+   * the Role Permission Manager's whitelisted backend, which drives
+   * "Custom DocPerm" rows that Frappe merges into the doctype's runtime
+   * permissions. add creates the row (read=1 only, silent no-op if the
+   * row already exists); update rewrites each flag on the existing row
+   * and clears the doctype cache after commit. Probes at the end; if
+   * the site still refuses, throws with the bench-console fix so ops
+   * isn't left guessing.
    */
   private async ensureNativeVehiclePermission(): Promise<void> {
-    if (await this.canReadVehicles()) return;
+    // No early return on a passing read probe — read alone proves nothing
+    // (gotcha 5): a bench add_permission("Vehicle", "System Manager")
+    // leaves the Custom DocPerm row with read=1 only. add/update are
+    // cheap idempotent method calls and this whole ensure is memoized
+    // per process by ensureVehicleDoctypes anyway.
 
-    const existing = await this.listResource<{ name: string }>({
-      doctype: 'Custom DocPerm',
-      filters: [
-        ['Custom DocPerm', 'parent', '=', 'Vehicle'],
-        ['Custom DocPerm', 'role', '=', 'System Manager'],
-        ['Custom DocPerm', 'permlevel', '=', 0],
-      ],
-      fields: ['name'],
-      limit: 1,
-    });
+    const PM = 'frappe.core.page.permission_manager.permission_manager';
 
-    if (existing.length === 0) {
+    // 1. Create the System Manager Custom DocPerm row if absent.
+    //    add_permission sets ONLY read=1 and is a silent no-op when the
+    //    row already exists (it never rewrites flags).
+    try {
+      await this.callMethod(PM + '.add', { parent: 'Vehicle', role: 'System Manager', permlevel: 0 });
+    } catch (err) {
+      this.logger.warn('permission_manager.add on Vehicle failed: ' + String(err));
+    }
+
+    // 2. Force the flags the portal needs on that row. update_permission
+    //    property rewrites the EXISTING row's flag — the only whitelisted
+    //    path that does — and each call registers frappe.clear_cache
+    //    (doctype="Vehicle") after commit.
+    for (const ptype of ['read', 'write', 'create', 'delete']) {
       try {
-        await this.createResource('Custom DocPerm', {
-          parent: 'Vehicle',
+        await this.callMethod(PM + '.update', {
+          doctype: 'Vehicle',
           role: 'System Manager',
           permlevel: 0,
-          read: 1,
-          write: 1,
-          create: 1,
-          delete: 1,
-          report: 1,
-          share: 1,
+          ptype,
+          value: 1,
+          if_owner: 0,
         });
-        this.logger.log('Created Custom DocPerm: System Manager on native "Vehicle" (shipped with no permissions)');
       } catch (err) {
-        this.logger.warn('Custom DocPerm create on Vehicle failed: ' + String(err));
+        this.logger.warn('permission_manager.update(' + ptype + ') on Vehicle failed: ' + String(err));
       }
     }
 
@@ -419,7 +438,10 @@ export class ErpPlatformService {
       throw new Error(
         'The native "Vehicle" doctype has no role permissions and they could not be granted over REST. ' +
           'Run once in bench console (docker exec -it erpnext-backend-1 bash, then bench --site <site> console): ' +
-          'frappe.permissions.add_permission("Vehicle", "System Manager"); frappe.db.commit()',
+          'frappe.permissions.add_permission("Vehicle", "System Manager"); ' +
+          'frappe.permissions.update_permission_property("Vehicle", "System Manager", 0, "write", 1); ' +
+          'frappe.permissions.update_permission_property("Vehicle", "System Manager", 0, "create", 1); ' +
+          'frappe.db.commit()',
       );
     }
   }
