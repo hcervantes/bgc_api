@@ -208,10 +208,9 @@ export class ErpPlatformService {
 
   /**
    * POST /api/method/<method> with a JSON body — call a whitelisted server
-   * method. Needed for operations REST resource writes refuse: e.g.
-   * STANDARD DocTypes can't be PUT-ed outside developer mode
-   * (CannotCreateStandardDoctypeError, bgc-dev Nov 2), so missing DocPerm
-   * rows on them go through frappe.permissions.add_permission instead.
+   * method. NOTE (bgc-dev, Nov 2): frappe.permissions.add_permission is NOT
+   * whitelisted in v16 (403 "Function ... is not whitelisted") — retained
+   * for methods that are.
    */
   async callMethod(method: string, body?: Record<string, unknown>): Promise<unknown> {
     const res = (await this.request('POST', '/api/method/' + method, body ?? {})) as { message?: unknown };
@@ -336,17 +335,23 @@ export class ErpPlatformService {
    * pattern as Customer.
    *
    * "Odometer Log" IS ours (custom DocType, module Core) and is created
-   * here. FRAPPE GOTCHAS (bgc-dev, Nov 2):
+   * here. FRAPPE GOTCHAS (bgc-dev, Nov 2 — FOUR layers, all fixed here):
    *  1. A DocType created via REST with NO permissions array gets ZERO
    *     role permissions — even System Manager 403s. The create payload
    *     ships a System Manager DocPerm row; the self-heal below patches
    *     doctypes created by the earlier payload.
    *  2. The NATIVE Vehicle doctype ALSO ships with an empty permission
    *     table (rarely-used e-Way Bill doctype) → 403 for everyone.
-   *     Standard DocTypes can't be PUT-ed via REST outside developer mode
-   *     (417 CannotCreateStandardDoctypeError), so the grant goes through
-   *     the whitelisted frappe.permissions.add_permission method, which is
-   *     idempotent and appends without touching the doctype definition.
+   *  3. Standard DocTypes can't be PUT-ed via REST outside developer
+   *     mode (417 CannotCreateStandardDoctypeError) — the DocType PUT
+   *     trick only works for CUSTOM doctypes.
+   *  4. frappe.permissions.add_permission is NOT whitelisted (403 via
+   *     /api/method). The REST-legal route is the "Custom DocPerm"
+   *     doctype — Frappe's own mechanism for layering extra permissions
+   *     onto standard doctypes without developer mode. ensureNativeVehicle
+   *     Permission probes first, creates the Custom DocPerm if missing,
+   *     re-probes, and fails with the bench-console one-liner if the
+   *     site still refuses.
    */
   async ensureVehicleDoctypes(): Promise<void> {
     this.vehicleDoctypesEnsure ??= this.doEnsureVehicleDoctypes().catch((err) => {
@@ -358,20 +363,69 @@ export class ErpPlatformService {
     return this.vehicleDoctypesEnsure;
   }
 
-  private async doEnsureVehicleDoctypes(): Promise<void> {
-    // The NATIVE Vehicle doctype (module Setup) ships with an EMPTY
-    // permission table — it's a rarely-used e-Way Bill doctype, and with
-    // no DocPerm rows even System Manager gets 403 "Insufficient
-    // Permission" on every Vehicle read/write (bgc-dev, Nov 2). We must
-    // never create or drop the doctype itself, and its DocType doc can't
-    // be PUT-ed via REST (standard doctype, no developer mode → 417),
-    // so grant System Manager through the whitelisted permission method.
-    // add_permission is idempotent (it updates the existing DocPerm row
-    // if there is one) and needs no read of the current perm table.
-    await this.callMethod('frappe.permissions.add_permission', {
-      doctype: 'Vehicle',
-      role: 'System Manager',
+  /** Probe: can the service account list Vehicle docs? (403 → false). */
+  private async canReadVehicles(): Promise<boolean> {
+    try {
+      await this.listResource({ doctype: 'Vehicle', filters: [['Vehicle', 'name', 'is', 'set']], fields: ['name'], limit: 1 });
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Grant System Manager access to the NATIVE Vehicle doctype. It ships
+   * with an empty permission table, and every direct route to its DocPerm
+   * child table is blocked for the REST user (no developer mode; the
+   * permission method not whitelisted) — so the grant rides on a
+   * "Custom DocPerm" row, which Frappe merges into the doctype's runtime
+   * permissions. Probes before/after; if the site still refuses, throws
+   * with the bench-console fix so ops isn't left guessing.
+   */
+  private async ensureNativeVehiclePermission(): Promise<void> {
+    if (await this.canReadVehicles()) return;
+
+    const existing = await this.listResource<{ name: string }>({
+      doctype: 'Custom DocPerm',
+      filters: [
+        ['Custom DocPerm', 'parent', '=', 'Vehicle'],
+        ['Custom DocPerm', 'role', '=', 'System Manager'],
+        ['Custom DocPerm', 'permlevel', '=', 0],
+      ],
+      fields: ['name'],
+      limit: 1,
     });
+
+    if (existing.length === 0) {
+      try {
+        await this.createResource('Custom DocPerm', {
+          parent: 'Vehicle',
+          role: 'System Manager',
+          permlevel: 0,
+          read: 1,
+          write: 1,
+          create: 1,
+          delete: 1,
+          report: 1,
+          share: 1,
+        });
+        this.logger.log('Created Custom DocPerm: System Manager on native "Vehicle" (shipped with no permissions)');
+      } catch (err) {
+        this.logger.warn('Custom DocPerm create on Vehicle failed: ' + String(err));
+      }
+    }
+
+    if (!(await this.canReadVehicles())) {
+      throw new Error(
+        'The native "Vehicle" doctype has no role permissions and they could not be granted over REST. ' +
+          'Run once in bench console (docker exec -it erpnext-backend-1 bash, then bench --site <site> console): ' +
+          'frappe.permissions.add_permission("Vehicle", "System Manager"); frappe.db.commit()',
+      );
+    }
+  }
+
+  private async doEnsureVehicleDoctypes(): Promise<void> {
+    await this.ensureNativeVehiclePermission();
 
     // Ride on the NATIVE Vehicle doctype — label custom field only.
     await this.ensureCustomField({
