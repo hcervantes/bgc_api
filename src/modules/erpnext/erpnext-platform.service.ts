@@ -206,6 +206,18 @@ export class ErpPlatformService {
     );
   }
 
+  /**
+   * POST /api/method/<method> with a JSON body — call a whitelisted server
+   * method. Needed for operations REST resource writes refuse: e.g.
+   * STANDARD DocTypes can't be PUT-ed outside developer mode
+   * (CannotCreateStandardDoctypeError, bgc-dev Nov 2), so missing DocPerm
+   * rows on them go through frappe.permissions.add_permission instead.
+   */
+  async callMethod(method: string, body?: Record<string, unknown>): Promise<unknown> {
+    const res = (await this.request('POST', '/api/method/' + method, body ?? {})) as { message?: unknown };
+    return res?.message ?? res;
+  }
+
   /** Idempotent Custom Field creation (data-plane-wide). */
   async ensureCustomField(spec: {
     docname: string; // e.g. "Journal Entry-portal_entry"
@@ -324,15 +336,17 @@ export class ErpPlatformService {
    * pattern as Customer.
    *
    * "Odometer Log" IS ours (custom DocType, module Core) and is created
-   * here. FRAPPE GOTCHA (bgc-dev, Nov 2): a DocType created via REST with
-   * NO permissions array gets ZERO role permissions — even System Manager
-   * then gets 403 "Insufficient Permission" on every read. The create
-   * payload therefore ships a System Manager permission row, and the
-   * self-heal below patches doctypes created by the earlier payload
-   * (e.g. bgc-dev) that have none. THE SAME applies to the NATIVE Vehicle
-   * doctype: it ships with an empty permission table (rarely-used e-Way
-   * Bill doctype) — System Manager 403s on it too until a perm row is
-   * granted (append-only, never replace native perms).
+   * here. FRAPPE GOTCHAS (bgc-dev, Nov 2):
+   *  1. A DocType created via REST with NO permissions array gets ZERO
+   *     role permissions — even System Manager 403s. The create payload
+   *     ships a System Manager DocPerm row; the self-heal below patches
+   *     doctypes created by the earlier payload.
+   *  2. The NATIVE Vehicle doctype ALSO ships with an empty permission
+   *     table (rarely-used e-Way Bill doctype) → 403 for everyone.
+   *     Standard DocTypes can't be PUT-ed via REST outside developer mode
+   *     (417 CannotCreateStandardDoctypeError), so the grant goes through
+   *     the whitelisted frappe.permissions.add_permission method, which is
+   *     idempotent and appends without touching the doctype definition.
    */
   async ensureVehicleDoctypes(): Promise<void> {
     this.vehicleDoctypesEnsure ??= this.doEnsureVehicleDoctypes().catch((err) => {
@@ -349,20 +363,15 @@ export class ErpPlatformService {
     // permission table — it's a rarely-used e-Way Bill doctype, and with
     // no DocPerm rows even System Manager gets 403 "Insufficient
     // Permission" on every Vehicle read/write (bgc-dev, Nov 2). We must
-    // never create or drop the doctype itself, but granting System
-    // Manager a permission row is safe and required. PUT with the FULL
-    // permissions array (existing rows + ours) — a partial array would
-    // REPLACE the child table and wipe native perms.
-    const vehicleDt = await this.getResource<{ permissions?: Array<Record<string, unknown>> }>('DocType', 'Vehicle');
-    if (vehicleDt && !(vehicleDt.permissions ?? []).some((p) => (p as { role?: string }).role === 'System Manager')) {
-      await this.updateResource('DocType', 'Vehicle', {
-        permissions: [
-          ...(vehicleDt.permissions ?? []),
-          { role: 'System Manager', read: 1, write: 1, create: 1, delete: 1, report: 1, share: 1 },
-        ],
-      });
-      this.logger.log('Granted System Manager permissions on native "Vehicle" doctype (shipped with none)');
-    }
+    // never create or drop the doctype itself, and its DocType doc can't
+    // be PUT-ed via REST (standard doctype, no developer mode → 417),
+    // so grant System Manager through the whitelisted permission method.
+    // add_permission is idempotent (it updates the existing DocPerm row
+    // if there is one) and needs no read of the current perm table.
+    await this.callMethod('frappe.permissions.add_permission', {
+      doctype: 'Vehicle',
+      role: 'System Manager',
+    });
 
     // Ride on the NATIVE Vehicle doctype — label custom field only.
     await this.ensureCustomField({
@@ -419,7 +428,8 @@ export class ErpPlatformService {
 
     // Self-heal: doctypes created before the permissions fix (bgc-dev)
     // have no role rows at all → 403 for everyone, System Manager
-    // included. PUT with a permissions array replaces the child table.
+    // included. Odometer Log is CUSTOM, so a DocType PUT is allowed and
+    // the full-permissions array replaces the (empty) child table.
     const hasSysManager = (dt.permissions ?? []).some((p) => p.role === 'System Manager');
     if (!hasSysManager) {
       await this.updateResource('DocType', 'Odometer Log', { permissions: ODOMETER_LOG_PERMS });
