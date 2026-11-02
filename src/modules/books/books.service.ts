@@ -512,6 +512,13 @@ export class BooksService {
       throw new BadRequestException('CUSTOMER_NAME_INVALID');
     }
     const client = await this.loadTenantBook(tenant);
+    // loadTenantBook already rejected a null erpCompanyName at runtime,
+    // but its inferred return type widens it back to string | null —
+    // re-narrow for the compiler (same anti-enumeration 404 if ever hit).
+    const company = client.erpCompanyName;
+    if (!company) {
+      throw new NotFoundException('BOOKKEEPING_NOT_ENABLED');
+    }
 
     await this.erp.ensureCustomField({
       docname: 'Customer-portal_company',
@@ -549,9 +556,9 @@ export class BooksService {
         }
         throw new ConflictException('CUSTOMER_NAME_CONFLICT');
       }
-      return this.insertCustomer(client.erpCompanyName, client.id, portalUserId, namespaced);
+      return this.insertCustomer(company, client.id, portalUserId, namespaced);
     }
-    return this.insertCustomer(client.erpCompanyName, client.id, portalUserId, label);
+    return this.insertCustomer(company, client.id, portalUserId, label);
   }
 
   private async insertCustomer(
