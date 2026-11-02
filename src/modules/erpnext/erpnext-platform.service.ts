@@ -300,40 +300,39 @@ export class ErpPlatformService {
   }
 
   /**
-   * Phase 4.2 — custom doctypes for odometer-based vehicle tracking.
+   * Phase 4.2 — vehicle tracking setup.
    * DECIDED (Oct 30, 2026): odometer replaces manual miles; users log
    * readings, the system computes miles from the previous reading.
    * Frappe HR's Vehicle Log was considered and DECLINED (HR app, Employee
-   * + Expense Claim machinery, wrong tenancy fit). "Vehicle" is a free
-   * docname on an ERPNext-only site (the old ERPNext Vehicle doctype moved
-   * into Frappe HR at v14) — if Frappe HR is ever installed, rename.
+   * + Expense Claim machinery, wrong tenancy fit).
    *
-   * Vehicle uses format autoname (VEH-#####) so tenant docnames can never
-   * collide in the global namespace (unlike Customer, which is field-named).
-   * FIRST-RUN VERIFICATION against bgc-dev is part of the PR checklist:
-   * Frappe may demand extra mandatory keys (417 tells you which).
+   * IMPORTANT (bgc-dev finding, Nov 2 2026): ERPNext v16 ships a NATIVE
+   * "Vehicle" DocType (module Setup, custom=0 — used by e-Way Bill
+   * transport; the earlier assumption that it "moved into Frappe HR at
+   * v14" is wrong, and hrms is not installed here anyway). NEVER create
+   * or drop it. We ride on the native doctype: tenancy uses its native
+   * company field, the current reading uses its native last_odometer
+   * field, and the portal-facing label rides on the portal_vehicle_name
+   * Custom Field created below. Docnames are one global namespace
+   * (license_plate, with a UNIQUE key), so BooksService namespaces
+   * cross-tenant label collisions with the Company abbr — the same
+   * pattern as Customer.
+   *
+   * "Odometer Log" IS ours (custom DocType, module Core) and is created
+   * here. FIRST-RUN VERIFICATION against bgc-dev is part of the PR
+   * checklist (Frappe may demand extra mandatory keys — 417 tells you
+   * which).
    */
   async ensureVehicleDoctypes(): Promise<void> {
-    if (!(await this.getResource('DocType', 'Vehicle'))) {
-      await this.request('POST', '/api/resource/DocType', {
-        name: 'Vehicle',
-        module: 'Core',
-        custom: 1,
-        autoname: 'format:VEH-{#####}',
-        naming_rule: 'Expression',
-        title_field: 'vehicle_name',
-        is_submitable: 0,
-        istable: 0,
-        track_changes: 1,
-        fields: [
-          { fieldname: 'vehicle_name', fieldtype: 'Data', label: 'Vehicle Name', reqd: 1, in_list_view: 1, in_standard_filter: 1 },
-          { fieldname: 'company', fieldtype: 'Link', label: 'Company', reqd: 1, options: 'Company' },
-          { fieldname: 'current_odometer', fieldtype: 'Int', label: 'Current Odometer', read_only: 1 },
-          { fieldname: 'portal_user_id', fieldtype: 'Data', label: 'Portal User', read_only: 1 },
-        ],
-      });
-      this.logger.log('Created custom DocType "Vehicle"');
-    }
+    // Ride on the NATIVE Vehicle doctype — label custom field only.
+    await this.ensureCustomField({
+      docname: 'Vehicle-portal_vehicle_name',
+      dt: 'Vehicle',
+      fieldname: 'portal_vehicle_name',
+      label: 'Portal Vehicle Name',
+      fieldtype: 'Data',
+      insertAfter: 'model',
+    });
     if (!(await this.getResource('DocType', 'Odometer Log'))) {
       await this.request('POST', '/api/resource/DocType', {
         name: 'Odometer Log',

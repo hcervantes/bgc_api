@@ -36,8 +36,12 @@ const NAME_GUARD = /^[A-Za-z0-9 &'./-]{1,50}$/;
  *   and audited in the AuditLog.
  *
  * Phase 4.2 (odometer revision, Oct 30, 2026):
- * - Vehicles: custom "Vehicle" doctype, tenant-scoped by company (format
- *   autoname VEH-##### — no global docname collisions).
+ * - Vehicles: ERPNext's NATIVE "Vehicle" doctype (module Setup — do not
+ *   create or drop it), tenant-scoped by its native company field. The
+ *   user-facing label rides on the portal_vehicle_name custom field;
+ *   last_odometer is the native current-reading field. Docnames are one
+ *   global namespace (license_plate), so cross-tenant label collisions
+ *   are suffixed with the Company abbr, exactly like Customer.
  * - Odometer readings REPLACE manual miles: miles are computed from the
  *   previous reading per vehicle. First reading = baseline (no JE). A
  *   reading WITH a purpose = business trip → auto-posted JE at the IRS
@@ -163,11 +167,11 @@ export class BooksService {
       if (dto.type === 'income') {
         throw new BadRequestException('VEHICLE_ONLY_FOR_EXPENSE_OR_ASSET');
       }
-      const vehicle = await this.erp.getResource<{ company?: string; vehicle_name?: string }>('Vehicle', dto.vehicleName);
+      const vehicle = await this.erp.getResource<{ company?: string; portal_vehicle_name?: string }>('Vehicle', dto.vehicleName);
       if (vehicle?.company !== client.erpCompanyName) {
         throw new NotFoundException('VEHICLE_NOT_FOUND');
       }
-      vehicleLabel = vehicle.vehicle_name ?? dto.vehicleName;
+      vehicleLabel = vehicle.portal_vehicle_name || dto.vehicleName;
     }
     // Cross-type guards: customer is income-only, asset detail asset-only.
     if (dto.customerName && dto.type !== 'income') {
@@ -234,7 +238,7 @@ export class BooksService {
     return { journalEntry: name };
   }
 
-  // ── Phase 4.2: Vehicles (tenant-scoped custom doctype) ─────────────────
+  // ── Phase 4.2: Vehicles (ERPNext's NATIVE Vehicle doctype) ──────────────
 
   async createVehicle(
     tenant: { clientId: string },
@@ -248,26 +252,32 @@ export class BooksService {
     const client = await this.loadTenantBook(tenant);
     await this.erp.ensureVehicleDoctypes();
 
-    // Per-Company label dedupe — two vehicles with the same name in one
-    // tenant is a mistake. (Docnames never collide: format autoname.)
-    const dupes = await this.erp.listResource<{ name: string }>({
-      doctype: 'Vehicle',
-      filters: [
-        ['Vehicle', 'company', '=', client.erpCompanyName],
-        ['Vehicle', 'vehicle_name', '=', label],
-      ],
-      fields: ['name'],
-      limit: 1,
-    });
-    if (dupes.length > 0) {
-      throw new ConflictException('VEHICLE_EXISTS');
+    // ERPNext's native Vehicle is one global namespace (license_plate,
+    // with a unique key on it) — same shape as Customer. Same label in
+    // this tenant → 409. Same label owned by a FOREIGN tenant →
+    // namespace ours with the Company abbr instead of failing.
+    const abbr = this.abbrFor(client.erpCompanyName);
+    let docname = label;
+    const existing = await this.erp.getResource<{ company?: string }>('Vehicle', label);
+    if (existing) {
+      if (existing.company === client.erpCompanyName) {
+        throw new ConflictException('VEHICLE_EXISTS');
+      }
+      docname = label + ' (' + abbr + ')';
+      const dupe = await this.erp.getResource<{ company?: string }>('Vehicle', docname);
+      if (dupe) {
+        if (dupe.company === client.erpCompanyName) {
+          throw new ConflictException('VEHICLE_EXISTS');
+        }
+        throw new ConflictException('VEHICLE_NAME_CONFLICT');
+      }
     }
 
     const name = await this.erp.createResource('Vehicle', {
-      vehicle_name: label,
+      license_plate: docname,
+      portal_vehicle_name: label,
       company: client.erpCompanyName,
-      current_odometer: 0,
-      portal_user_id: portalUserId,
+      last_odometer: 0,
     });
 
     await this.prisma.auditLog.create({
@@ -287,17 +297,17 @@ export class BooksService {
     tenant: { clientId: string },
   ): Promise<Array<{ name: string; label: string; currentOdometer: number }>> {
     const client = await this.loadTenantBook(tenant);
-    const rows = await this.erp.listResource<{ name: string; vehicle_name: string; current_odometer?: number }>({
+    const rows = await this.erp.listResource<{ name: string; portal_vehicle_name?: string; last_odometer?: number }>({
       doctype: 'Vehicle',
       filters: [['Vehicle', 'company', '=', client.erpCompanyName]],
-      fields: ['name', 'vehicle_name', 'current_odometer'],
+      fields: ['name', 'portal_vehicle_name', 'last_odometer'],
       orderBy: 'creation desc',
       limit: 100,
     });
     return rows.map((v) => ({
       name: v.name,
-      label: v.vehicle_name,
-      currentOdometer: Number(v.current_odometer ?? 0),
+      label: v.portal_vehicle_name || v.name,
+      currentOdometer: Number(v.last_odometer ?? 0),
     }));
   }
 
@@ -326,11 +336,11 @@ export class BooksService {
     await this.erp.ensureVehicleDoctypes();
 
     // Cross-tenant guarantee: the vehicle must belong to this tenant.
-    const vehicle = await this.erp.getResource<{ company?: string; vehicle_name?: string }>('Vehicle', dto.vehicle);
+    const vehicle = await this.erp.getResource<{ company?: string; portal_vehicle_name?: string }>('Vehicle', dto.vehicle);
     if (vehicle?.company !== client.erpCompanyName) {
       throw new NotFoundException('VEHICLE_NOT_FOUND');
     }
-    const vehicleLabel = vehicle.vehicle_name ?? dto.vehicle;
+    const vehicleLabel = vehicle.portal_vehicle_name || dto.vehicle;
 
     // Previous reading for this vehicle (latest by date, then creation).
     const prevRows = await this.erp.listResource<{ odometer?: number }>({
@@ -358,7 +368,7 @@ export class BooksService {
         company: client.erpCompanyName,
         portal_user_id: portalUserId,
       });
-      await this.erp.updateResource('Vehicle', dto.vehicle, { current_odometer: dto.odometer });
+      await this.erp.updateResource('Vehicle', dto.vehicle, { last_odometer: dto.odometer });
       await this.prisma.auditLog.create({
         data: {
           userId: portalUserId,
@@ -375,7 +385,6 @@ export class BooksService {
       throw new BadRequestException('ODOMETER_NOT_INCREASING');
     }
     const miles = dto.odometer - prevOdometer;
-    const trip = { ...dto, purpose };
 
     // Reading-only row: no JE, but still record the computed miles (the
     // diff is needed for BOY/EOY totals).
@@ -392,7 +401,7 @@ export class BooksService {
         company: client.erpCompanyName,
         portal_user_id: portalUserId,
       });
-      await this.erp.updateResource('Vehicle', dto.vehicle, { current_odometer: dto.odometer });
+      await this.erp.updateResource('Vehicle', dto.vehicle, { last_odometer: dto.odometer });
       await this.prisma.auditLog.create({
         data: {
           userId: portalUserId,
@@ -415,8 +424,8 @@ export class BooksService {
     const log = await this.erp.createResource('Odometer Log', {
       vehicle: dto.vehicle,
       vehicle_name: vehicleLabel,
-      date: trip.date,
-      odometer: trip.odometer,
+      date: dto.date,
+      odometer: dto.odometer,
       miles,
       rate: rateCents / 100,
       amount: amountCents / 100,
@@ -427,7 +436,7 @@ export class BooksService {
 
     const name = await this.erp.createJournalEntry({
       company: client.erpCompanyName,
-      posting_date: trip.date,
+      posting_date: dto.date,
       voucher_type: 'Journal Entry',
       user_remark: 'Mileage (' + vehicleLabel + '): ' + miles + ' mi — ' + purpose,
       portal_entry: 1,
@@ -440,7 +449,7 @@ export class BooksService {
     });
     await this.erp.submitJournalEntry(name);
     await this.erp.updateResource('Odometer Log', log, { journal_entry: name });
-    await this.erp.updateResource('Vehicle', dto.vehicle, { current_odometer: trip.odometer });
+    await this.erp.updateResource('Vehicle', dto.vehicle, { last_odometer: dto.odometer });
 
     await this.prisma.auditLog.create({
       data: {
@@ -539,10 +548,10 @@ export class BooksService {
       limit: 1,
     });
     if (sameLabel.length > 0) {
-      if (sameLabel[0].portal_company === client.erpCompanyName) {
+      if (sameLabel[0].portal_company === company) {
         throw new ConflictException('CUSTOMER_EXISTS');
       }
-      const abbr = this.abbrFor(client.erpCompanyName);
+      const abbr = this.abbrFor(company);
       const namespaced = label + ' (' + abbr + ')';
       const dupe = await this.erp.listResource<{ name: string; portal_company?: string }>({
         doctype: 'Customer',
@@ -551,7 +560,7 @@ export class BooksService {
         limit: 1,
       });
       if (dupe.length > 0) {
-        if (dupe[0].portal_company === client.erpCompanyName) {
+        if (dupe[0].portal_company === company) {
           throw new ConflictException('CUSTOMER_EXISTS');
         }
         throw new ConflictException('CUSTOMER_NAME_CONFLICT');
