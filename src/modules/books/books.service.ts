@@ -18,7 +18,11 @@ const ROOT_TYPE_BY_ENTRY: Record<EntryType, string> = {
 
 // Asset categories exclude the company's own liquid/operating accounts —
 // "what your business owns" is equipment, vehicles, etc., not its own cash.
-const ASSET_EXCLUDED_TYPES = ['Cash', 'Bank', 'Receivable', 'Payable', 'Stock'];
+// Contra-asset / non-ownership accounts must not appear either: Accumulated
+// Depreciation is a CREDIT-balance account — a user picking it for an asset
+// purchase (seen on bgc-dev, Nov 2026) debits the wrong account. Depreciation
+// (the expense) and固定资产 not needed... just keep the two contra types.
+const ASSET_EXCLUDED_TYPES = ['Cash', 'Bank', 'Receivable', 'Payable', 'Stock', 'Accumulated Depreciation', 'Depreciation'];
 
 // Same label guard as categories — customer/vehicle names land in docnames.
 const NAME_GUARD = /^[A-Za-z0-9 &'./-]{1,50}$/;
