@@ -243,6 +243,46 @@ export class ErpPlatformService {
     this.logger.log('Created Custom Field ' + spec.docname);
   }
 
+  /**
+   * Idempotent Property Setter — the REST-legal, no-developer-mode way
+   * to override a STANDARD doctype's field properties (gotcha 6). The
+   * native Vehicle's make/model/fuel_type/uom are reqd (e-Way Bill
+   * baggage the portal never collects) and last_odometer is
+   * set_only_once (per-reading updates would be silently ignored).
+   * Property Setter saves clear the doctype cache on update, so the
+   * override applies to subsequent requests immediately.
+   */
+  async ensurePropertySetter(spec: {
+    docType: string;
+    fieldName: string;
+    property: string;
+    propertyType: string;
+    value: string;
+  }): Promise<void> {
+    const existing = await this.listResource<{ name: string }>({
+      doctype: 'Property Setter',
+      filters: [
+        ['Property Setter', 'doc_type', '=', spec.docType],
+        ['Property Setter', 'field_name', '=', spec.fieldName],
+        ['Property Setter', 'property', '=', spec.property],
+      ],
+      fields: ['name'],
+      limit: 1,
+    });
+    if (existing.length > 0) return;
+    await this.createResource('Property Setter', {
+      doctype_or_field: 'DocField',
+      doc_type: spec.docType,
+      field_name: spec.fieldName,
+      property: spec.property,
+      property_type: spec.propertyType,
+      value: spec.value,
+    });
+    this.logger.log(
+      'Created Property Setter: ' + spec.docType + '.' + spec.fieldName + '.' + spec.property + ' = ' + spec.value,
+    );
+  }
+
   async findJournalEntryByStripeId(
     stripeInvoiceId: string,
   ): Promise<{ name: string; docstatus: number } | null> {
@@ -335,7 +375,7 @@ export class ErpPlatformService {
    * pattern as Customer.
    *
    * "Odometer Log" IS ours (custom DocType, module Core) and is created
-   * here. FRAPPE GOTCHAS (bgc-dev, Nov 2 — FOUR layers, all fixed here):
+   * here. FRAPPE GOTCHAS (bgc-dev, Nov 2 — SIX layers, all fixed here):
    *  1. A DocType created via REST with NO permissions array gets ZERO
    *     role permissions — even System Manager 403s. The create payload
    *     ships a System Manager DocPerm row; the self-heal below patches
@@ -363,6 +403,14 @@ export class ErpPlatformService {
    *     row's flags (and it registers frappe.clear_cache(doctype=...)
    *     after commit). ensureNativeVehiclePermission therefore runs add
    *     (row creation) + update per ptype (flag repair), then re-probes.
+   *  6. The native Vehicle's make/model/fuel_type/uom are reqd (e-Way
+   *     Bill baggage we never collect → 417 MandatoryError on our
+   *     minimal create payload), and last_odometer is set_only_once —
+   *     per-reading PUTs would be SILENTLY IGNORED, freezing the
+   *     "current reading" at the insert value forever. Property
+   *     Setters fix both (the REST-legal, no-developer-mode way to
+   *     override STANDARD field properties): reqd=0 on the four
+   *     baggage fields, set_only_once=0 on last_odometer.
    */
   async ensureVehicleDoctypes(): Promise<void> {
     this.vehicleDoctypesEnsure ??= this.doEnsureVehicleDoctypes().catch((err) => {
@@ -448,6 +496,17 @@ export class ErpPlatformService {
 
   private async doEnsureVehicleDoctypes(): Promise<void> {
     await this.ensureNativeVehiclePermission();
+
+    // Gotcha 6 — the native Vehicle's mandatory fields are e-Way Bill
+    // baggage the portal never collects (417 MandatoryError otherwise),
+    // and its last_odometer is set_only_once, which would silently
+    // ignore the per-reading updates the odometer flow posts. Override
+    // both via Property Setters (idempotent).
+    await this.ensurePropertySetter({ docType: 'Vehicle', fieldName: 'make', property: 'reqd', propertyType: 'Int', value: '0' });
+    await this.ensurePropertySetter({ docType: 'Vehicle', fieldName: 'model', property: 'reqd', propertyType: 'Int', value: '0' });
+    await this.ensurePropertySetter({ docType: 'Vehicle', fieldName: 'fuel_type', property: 'reqd', propertyType: 'Int', value: '0' });
+    await this.ensurePropertySetter({ docType: 'Vehicle', fieldName: 'uom', property: 'reqd', propertyType: 'Int', value: '0' });
+    await this.ensurePropertySetter({ docType: 'Vehicle', fieldName: 'last_odometer', property: 'set_only_once', propertyType: 'Check', value: '0' });
 
     // Ride on the NATIVE Vehicle doctype — label custom field only.
     await this.ensureCustomField({
