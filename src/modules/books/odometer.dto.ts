@@ -26,4 +26,13 @@ export class CreateOdometerDto {
   @IsString()
   @MaxLength(500)
   purpose?: string; // absent → reading-only, no JE
+
+  /** Cents per mile for this trip (1–1000). Absent → the API's
+   * MILEAGE_RATE_CENTS env default. Either way the rate is snapshotted
+   * on the Odometer Log row and the JE, so history never rewrites. */
+  @IsOptional()
+  @IsInt()
+  @Min(1)
+  @Max(1000)
+  rateCents?: number;
 }

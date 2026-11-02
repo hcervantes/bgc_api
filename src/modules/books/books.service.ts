@@ -451,7 +451,9 @@ export class BooksService {
     }
 
     // Business trip → auto-post the JE at the IRS rate (DECIDED Oct 2026).
-    const rateCents = this.mileageRateCents();
+    // Client-supplied per-trip rate (validated 1–1000 by the DTO) wins;
+    // absent → the env default. Snapshot logic below is unchanged.
+    const rateCents = dto.rateCents ?? this.mileageRateCents();
     const amountCents = Math.round(miles * rateCents);
     const abbr = this.abbrFor(client.erpCompanyName);
     const vehicleAccount = await this.erp.ensureMileageAccount(client.erpCompanyName, abbr);
