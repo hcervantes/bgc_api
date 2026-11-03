@@ -4,6 +4,7 @@ import { JwtAuthGuard } from '../../common/auth/jwt-auth.guard';
 import { TenantGuard } from '../../common/tenancy/tenant.guard';
 import { CurrentUser } from '../../common/auth/current-user.decorator';
 import { CreateEntryDto } from './create-entry.dto';
+import { CreateOdometerDto } from './odometer.dto';
 import { BooksService } from './books.service';
 
 /** Tenant-scoped bookkeeping entry endpoints (Standard tier self-entry). */
@@ -32,6 +33,52 @@ export class BooksController {
     @CurrentUser() user: { sub: string },
   ) {
     return this.service.createCategory(req.tenant as { clientId: string }, user.sub, dto);
+  }
+
+  /** Phase 4.2 — the tenant's vehicles (odometer tracking). */
+  @Get('vehicles')
+  vehicles(@Req() req: Request) {
+    return this.service.listVehicles(req.tenant as { clientId: string });
+  }
+
+  @Post('vehicles')
+  createVehicle(
+    @Req() req: Request,
+    @Body() dto: { name: string },
+    @CurrentUser() user: { sub: string },
+  ) {
+    return this.service.createVehicle(req.tenant as { clientId: string }, user.sub, dto);
+  }
+
+  /** Phase 4.2 — odometer readings; miles are computed from the previous
+   *  reading and a reading WITH a purpose auto-posts the mileage JE. */
+  @Get('odometer')
+  odometer(@Req() req: Request) {
+    return this.service.listOdometer(req.tenant as { clientId: string });
+  }
+
+  @Post('odometer')
+  logOdometer(
+    @Req() req: Request,
+    @Body() dto: CreateOdometerDto,
+    @CurrentUser() user: { sub: string },
+  ) {
+    return this.service.createOdometerReading(req.tenant as { clientId: string }, user.sub, dto);
+  }
+
+  /** Phase 4.2 — income counterparties (tenant-scoped Customer docs). */
+  @Get('customers')
+  customers(@Req() req: Request) {
+    return this.service.listCustomers(req.tenant as { clientId: string });
+  }
+
+  @Post('customers')
+  createCustomer(
+    @Req() req: Request,
+    @Body() dto: { name: string },
+    @CurrentUser() user: { sub: string },
+  ) {
+    return this.service.createCustomer(req.tenant as { clientId: string }, user.sub, dto);
   }
 
   @Post('entries')
