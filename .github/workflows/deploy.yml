@@ -1,9 +1,10 @@
 name: Deploy (production)
 
 # Stage 2 of the BGC CI/CD plan (Documenation/cicd_plan.md in bgc_project).
-# Manual dispatch ONLY (decided): builds the chosen ref, pushes a SHA-tagged image to the
-# DO registry, then SSHes to the bgc-portal droplet which runs migrate-first + compose up.
-# Version numbers live in GitHub Release notes, not the image tag (decided Nov 4).
+# Manual dispatch ONLY (decided). build-push runs on a GitHub-hosted runner;
+# the deploy job runs ON the droplet via the self-hosted runner labeled
+# 'bgc-droplet' (Option B: no inbound SSH from GitHub, port 22 stays
+# home-IP-only). Version numbers live in GitHub Release notes (decided Nov 4).
 
 on:
   workflow_dispatch:
@@ -39,27 +40,23 @@ jobs:
         run: |
           IMAGE=registry.digitalocean.com/bgc-registry/api
           TAG=sha-$(git rev-parse --short HEAD)
+
           docker build -t "$IMAGE:$TAG" .
           docker push "$IMAGE:$TAG"
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
 
   deploy:
-    runs-on: ubuntu-latest
+    # Self-hosted runner installed on the bgc-portal droplet (label: bgc-droplet).
+    # Requires sudoers entry (droplet, visudo):
+    #   gh-runner ALL=(root) NOPASSWD: /srv/bgc/deploy.sh
+    runs-on: bgc-droplet
     needs: build-push
     environment: production
     steps:
-      - name: Deploy to droplet (migrate first, then compose up)
-        uses: appleboy/ssh-action@v1
-        with:
-          host: ${{ secrets.DROPLET_HOST }}
-          username: ${{ secrets.DROPLET_SSH_USER || 'root' }}
-          key: ${{ secrets.DROPLET_SSH_KEY }}
-          # deploy.sh: docker pull -> prisma migrate deploy -> compose up -d -> health checks.
-          # It fails non-zero, which fails this job. Keep SSH restricted to this forced command.
-          script: /srv/bgc/deploy.sh api ${{ needs.build-push.outputs.tag }}
+      - name: Deploy (pull -> migrate first -> compose up -> health checks)
+        run: sudo /srv/bgc/deploy.sh api ${{ needs.build-push.outputs.tag }}
 
-      - name: Verify API health
+      - name: Verify api health
         run: |
           sleep 5
-          curl -fsS https://api.mybgctax.com/v1/health \
-            || (echo "API HEALTH CHECK FAILED AFTER DEPLOY"; exit 1)
+          curl -fsS https://api.mybgctax.com/v1/health || { echo "API HEALTH CHECK FAILED AFTER DEPLOY"; exit 1; }
