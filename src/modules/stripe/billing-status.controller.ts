@@ -11,6 +11,12 @@ import { PrismaService } from '../../common/prisma/prisma.service';
 // subscription metadata set at portal checkout. findFirst on updatedAt
 // keeps this correct even if a user ever has more than one subscription
 // row (e.g. after a cancel + resubscribe cycle).
+//
+// tenantSlug/tenantName expose the provisioned tenant (Client) for this
+// subscription. The two databases are separate by design: bgc-api can't
+// write the portal's User.tenantId, so the portal uses these fields to
+// upsert its Tenant row and link the user on billing/Books load
+// (fixes: new subscriber → "Could not load your chart of accounts").
 @Controller('billing/status')
 // JwtAuthGuard is per-controller in this codebase (not global) — without
 // it, unauthenticated requests reach the handler with req.user undefined.
@@ -23,12 +29,15 @@ export class BillingStatusController {
     const sub = await this.prisma.stripeSubscription.findFirst({
       where: { portalUserId: user.sub },
       orderBy: { updatedAt: 'desc' },
+      include: { client: { select: { slug: true, name: true } } },
     });
 
     return {
       status: sub?.status ?? null,
       priceId: sub?.priceId ?? null,
       currentPeriodEnd: sub?.currentPeriodEnd?.toISOString() ?? null,
+      tenantSlug: sub?.client?.slug ?? null,
+      tenantName: sub?.client?.name ?? null,
     };
   }
 }
