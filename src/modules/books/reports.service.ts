@@ -203,8 +203,18 @@ export class ReportsService {
     const rows = rawRows.map((r) => {
       const row: Record<string, unknown> = {};
       if (r && !Array.isArray(r) && typeof r === 'object') {
+        // Keep the FULL source dict, not just the declared columns:
+        // financial-statement rows carry hierarchy metadata beyond the
+        // column list (indent, bold, parent_account) that the portal
+        // statement view and charts rely on to tell group headers from
+        // leaves. Column fieldnames are still normalized to null so the
+        // wire shape stays stable.
+        const src = r as Record<string, unknown>;
         for (const c of columns) {
-          row[c.fieldname] = (r as Record<string, unknown>)[c.fieldname] ?? null;
+          row[c.fieldname] = src[c.fieldname] ?? null;
+        }
+        for (const [k, v] of Object.entries(src)) {
+          if (!(k in row)) row[k] = v;
         }
       } else {
         columns.forEach((c, i) => {
