@@ -137,6 +137,7 @@ export class BooksService {
         insertAfter: 'customer_group',
       });
       await this.ensurePortalCustomFields();
+      await this.ensureCustomerDefaults();
     })().catch((err) => {
       this.booksMetaEnsure = null;
       throw err;
@@ -609,6 +610,39 @@ export class BooksService {
     return this.insertCustomer(company, client.id, portalUserId, label);
   }
 
+  /** Leaf (non-group) Customer Group / Territory used on Customer creation.
+   *  ERPNext validates both against is_group=0 — the tree roots fail with
+   *  417. Env-overridable so a site with existing leaf nodes can reuse them
+   *  instead of the defaults. */
+  private customerGroupDefault(): string {
+    return process.env.ERP_CUSTOMER_GROUP ?? 'BGC Clients';
+  }
+
+  private territoryDefault(): string {
+    return process.env.ERP_TERRITORY ?? 'United States';
+  }
+
+  /** Create the configured leaf Customer Group + Territory if the site
+   *  doesn't have them yet. Memoized via ensureBooksMeta — runs once per
+   *  process, not per customer. */
+  private async ensureCustomerDefaults(): Promise<void> {
+    const customerGroup = this.customerGroupDefault();
+    if (!(await this.erp.getResource('Customer Group', customerGroup))) {
+      await this.erp.createResource('Customer Group', {
+        customer_group_name: customerGroup,
+        is_group: 0,
+      });
+    }
+    const territory = this.territoryDefault();
+    if (!(await this.erp.getResource('Territory', territory))) {
+      await this.erp.createResource('Territory', {
+        territory_name: territory,
+        is_group: 0,
+        parent_territory: 'All Territories',
+      });
+    }
+  }
+
   private async insertCustomer(
     companyName: string,
     clientId: string,
@@ -616,11 +650,16 @@ export class BooksService {
     customerName: string,
   ): Promise<{ customer: string }> {
     // Customer mandatory fields (417 otherwise): customer_group + territory.
+    // BOTH must be LEAF nodes (is_group=0) — the tree roots hardcoded here
+    // before were Group-type, and ERPNext rejects them with 417
+    // "Cannot select a Group type Customer Group" (prod, Nov 5).
+    // ensureCustomerDefaults() (memoized via ensureBooksMeta) creates the
+    // configured leafs on sites that don't have them yet.
     const name = await this.erp.createResource('Customer', {
       customer_name: customerName,
       customer_type: 'Individual',
-      customer_group: 'All Customer Groups',
-      territory: 'All Territories',
+      customer_group: this.customerGroupDefault(),
+      territory: this.territoryDefault(),
       portal_company: companyName,
     });
 
