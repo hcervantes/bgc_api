@@ -777,7 +777,7 @@ export class BooksService {
   }
 
   async listEntries(tenant: { clientId: string }): Promise<
-    Array<{ id: string; date: string; description: string; total: number; status: string }>
+    Array<{ id: string; date: string; description: string; category: string; total: number; status: string }>
   > {
     const client = await this.loadTenantBook(tenant);
     // Journal Entry.portal_entry doesn't exist on a fresh site until the
@@ -795,10 +795,57 @@ export class BooksService {
       orderBy: 'posting_date desc',
       limit: 50,
     });
+    // Category enrichment (Nov 2026): users reconcile Recent Entries
+    // against their bank statement, so each row must say WHERE the money
+    // went — the non-Cash side of the JE. Portal entries are always
+    // two-line (category account vs Cash - ABBR), so ONE child-table
+    // query covers all rows; the label strips the " - ABBR" suffix to
+    // match the category dropdowns (which show account_name).
+    const categoryByJe = new Map<string, string>();
+    if (rows.length > 0) {
+      const abbr = this.abbrFor(client.erpCompanyName);
+      const cash = 'Cash - ' + abbr;
+      const suffix = ' - ' + abbr;
+      const ids = rows.map((je) => je.name as string);
+      let lines: Array<{ parent?: string; account?: string }> = [];
+      try {
+        lines = await this.erp.listResource<{ parent?: string; account?: string }>({
+          doctype: 'Journal Entry Account',
+          filters: [
+            ['Journal Entry Account', 'parenttype', '=', 'Journal Entry'],
+            ['Journal Entry Account', 'parent', 'in', ids],
+          ],
+          fields: ['parent', 'account'],
+          limit: ids.length * 4,
+        });
+      } catch {
+        // Some sites refuse list access on the child table — fall back to
+        // per-doc fetches (getResource returns the full doc incl. accounts).
+        this.logger.warn('Journal Entry Account list failed — falling back to per-doc fetch');
+        for (const id of ids) {
+          const doc = await this.erp.getResource<{ accounts?: Array<{ account?: string }> }>('Journal Entry', id);
+          for (const a of doc?.accounts ?? []) {
+            lines.push({ parent: id, account: a.account });
+          }
+        }
+      }
+      for (const l of lines) {
+        if (!l.parent || !l.account) continue;
+        if (l.account === cash) continue;
+        if (!categoryByJe.has(l.parent)) {
+          categoryByJe.set(
+            l.parent,
+            l.account.endsWith(suffix) ? l.account.slice(0, -suffix.length) : l.account,
+          );
+        }
+      }
+    }
+
     return rows.map((je) => ({
       id: je.name as string,
       date: je.posting_date as string,
       description: (je.user_remark as string) ?? '',
+      category: categoryByJe.get(je.name as string) ?? '',
       total: Number(je.total_debit ?? 0),
       status: je.docstatus === 1 ? 'submitted' : 'draft',
     }));
