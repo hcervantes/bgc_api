@@ -103,7 +103,7 @@ export class BooksService {
   /** Tenant Client row with bookkeeping live — else anti-enumeration 404.
    *  Separate early throws (not one ||-chain) so TS flow analysis
    *  narrows the return to non-null for callers. */
-  private async loadTenantBook(tenant: { clientId: string }) {
+  private async loadTenantBook(tenant: { clientId: string }): Promise<{ id: string; erpCompanyName: string }> {
     const client = await this.prisma.client.findUnique({ where: { id: tenant.clientId } });
     if (!client) {
       // Not an error state to reveal: same 404 as a non-member tenant.
@@ -112,7 +112,10 @@ export class BooksService {
     if (!client.bookkeepingEnabled || !client.erpCompanyName) {
       throw new NotFoundException('BOOKKEEPING_NOT_ENABLED');
     }
-    return client;
+    // Return the narrowed shape every books method consumes — the guard
+    // above proves erpCompanyName is non-null, but returning the raw
+    // Prisma row keeps it typed string | null downstream.
+    return { id: client.id, erpCompanyName: client.erpCompanyName };
   }
 
   /**
