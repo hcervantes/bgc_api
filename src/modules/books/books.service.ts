@@ -2,6 +2,7 @@ import { BadRequestException, ConflictException, Injectable, Logger, NotFoundExc
 import { PrismaService } from '../../common/prisma/prisma.service';
 import { ErpPlatformService } from '../erpnext/erpnext-platform.service';
 import { CreateEntryDto, EntryType } from './create-entry.dto';
+import { UpdateAssetDto } from './update-asset.dto';
 import { CreateOdometerDto } from './odometer.dto';
 
 // Entry type → ERPNext root_type on the tenant's chart.
@@ -338,7 +339,7 @@ export class BooksService {
    * picker.
    */
   async listAssets(tenant: { clientId: string }): Promise<
-    Array<{ id: string; date: string; description: string; cost: number | null; vehicleName: string | null }>
+    Array<{ id: string; date: string; description: string; cost: number | null; vehicleName: string | null; purchaseDate: string | null }>
   > {
     const client = await this.loadTenantBook(tenant);
     await this.ensureBooksMeta();
@@ -346,7 +347,7 @@ export class BooksService {
       ['Journal Entry', 'company', '=', client.erpCompanyName],
       ['Journal Entry', 'portal_entry', '=', 1],
     ];
-    const fields = ['name', 'posting_date', 'user_remark', 'portal_asset_cost', 'total_debit', 'portal_vehicle_name'];
+    const fields = ['name', 'posting_date', 'user_remark', 'portal_asset_cost', 'total_debit', 'portal_vehicle_name', 'portal_asset_purchase_date'];
     const [tagged, legacy] = await Promise.all([
       this.erp.listResource<Record<string, unknown>>({
         doctype: 'Journal Entry',
@@ -364,7 +365,7 @@ export class BooksService {
       }),
     ]);
     const seen = new Set<string>();
-    const out: Array<{ id: string; date: string; description: string; cost: number | null; vehicleName: string | null }> = [];
+    const out: Array<{ id: string; date: string; description: string; cost: number | null; vehicleName: string | null; purchaseDate: string | null }> = [];
     for (const je of [...tagged, ...legacy]) {
       const id = je.name as string;
       if (seen.has(id)) continue;
@@ -375,9 +376,88 @@ export class BooksService {
         description: (je.user_remark as string) ?? '',
         cost: je.portal_asset_cost != null ? Number(je.portal_asset_cost) : Number(je.total_debit ?? 0) || null,
         vehicleName: (je.portal_vehicle_name as string) ?? null,
+        purchaseDate: (je.portal_asset_purchase_date as string) || null,
       });
     }
     return out.sort((a, b) => b.date.localeCompare(a.date));
+  }
+
+  /**
+   * Phase 4.3 — edit a previously entered asset (the Asset tab's list).
+   * Only the asset METADATA changes: description (user_remark), cost basis,
+   * purchase date, and the vehicle label (create-or-reuse via the same
+   * ensureVehicleByLabel as entry creation). The posted GL lines of the
+   * submitted Journal Entry are immutable — an amount/category correction
+   * is a new entry, by design.
+   *
+   * The submitted JE rejects a plain REST PUT (UpdateAfterSubmitError on
+   * non-allow_on_submit fields), so the write rides the whitelisted
+   * frappe.client.set_value — every value is validated here BEFORE it
+   * reaches ERPNext.
+   */
+  async updateAsset(
+    tenant: { clientId: string },
+    portalUserId: string,
+    jeName: string,
+    dto: UpdateAssetDto,
+  ): Promise<{ ok: true }> {
+    const client = await this.loadTenantBook(tenant);
+    await this.ensureBooksMeta();
+
+    // Same cross-tenant guarantee as the expense tie: the JE must be a
+    // portal asset entry of THIS tenant — anything else is 404'd as
+    // anti-enumeration.
+    const je = await this.erp.getResource<{
+      company?: string;
+      portal_entry?: number;
+      portal_asset_entry?: number;
+      portal_asset_cost?: number;
+    }>('Journal Entry', jeName);
+    const isAssetJe =
+      je?.company === client.erpCompanyName &&
+      Number(je?.portal_entry) === 1 &&
+      (Number(je?.portal_asset_entry) === 1 || je?.portal_asset_cost != null);
+    if (!isAssetJe) {
+      throw new NotFoundException('ASSET_NOT_FOUND');
+    }
+
+    const values: Record<string, unknown> = {};
+    if (dto.description !== undefined) {
+      const description = dto.description.trim();
+      if (!description) throw new BadRequestException('DESCRIPTION_REQUIRED');
+      if (description.length > 200) throw new BadRequestException('DESCRIPTION_TOO_LONG');
+      values.user_remark = description;
+    }
+    if (dto.costCents !== undefined) {
+      values.portal_asset_cost = dto.costCents / 100;
+    }
+    if (dto.purchaseDate !== undefined) {
+      values.portal_asset_purchase_date = dto.purchaseDate;
+    }
+    if (dto.vehicleLabel !== undefined) {
+      if (dto.vehicleLabel === '') {
+        values.portal_vehicle_name = ''; // explicit clear of the vehicle tag
+      } else {
+        const label = dto.vehicleLabel.trim();
+        if (!NAME_GUARD.test(label)) throw new BadRequestException('VEHICLE_NAME_INVALID');
+        // Same create-or-reuse as entry creation — editing the vehicle
+        // name is the SAME one-vehicle-concept step.
+        values.portal_vehicle_name = await this.ensureVehicleByLabel(client, portalUserId, label);
+      }
+    }
+    if (Object.keys(values).length === 0) return { ok: true }; // no-op save
+
+    await this.erp.callMethod('frappe.client.set_value', {
+      doctype: 'Journal Entry',
+      name: jeName,
+      fieldname: values,
+    });
+
+    await this.prisma.auditLog.create({
+      data: { userId: portalUserId, clientId: client.id, action: 'books.asset.updated', targetId: jeName },
+    });
+    this.logger.log('Portal asset update ' + jeName + ' by ' + portalUserId + ' (' + Object.keys(values).join(', ') + ')');
+    return { ok: true };
   }
 
   /**
