@@ -178,6 +178,20 @@ export class BooksService {
     const client = await this.loadTenantBook(tenant);
     const expectedRoot = ROOT_TYPE_BY_ENTRY[dto.type];
 
+    // Phase 4.3 — a vehicle asset entry may omit the category entirely:
+    // it auto-selects the tenant's "Vehicles" fixed-asset account (created
+    // under Fixed Assets on first use). Non-vehicle entries still require
+    // an explicit category.
+    if (dto.type === 'asset' && dto.newVehicleLabel && !dto.accountName) {
+      dto.accountName = await this.erp.ensureVehicleAssetAccount(
+        client.erpCompanyName,
+        this.abbrFor(client.erpCompanyName),
+      );
+    }
+    if (!dto.accountName) {
+      throw new BadRequestException('ACCOUNT_REQUIRED');
+    }
+
     // Cross-tenant guarantee: the account must exist AND belong to the
     // tenant's Company with the expected root_type (and, for assets, not
     // be a liquid/operating account). Foreign account → 404
@@ -257,7 +271,7 @@ export class BooksService {
       const isAssetJe =
         je?.company === client.erpCompanyName &&
         Number(je?.portal_entry) === 1 &&
-        (Number(je?.portal_asset_entry) === 1 || je?.portal_asset_cost != null);
+        (Number(je?.portal_asset_entry) === 1 || Number(je?.portal_asset_cost) > 0);
       if (!isAssetJe) {
         throw new NotFoundException('ASSET_NOT_FOUND');
       }
@@ -305,7 +319,11 @@ export class BooksService {
       // the Asset Register (which lists cost-basis entries only) — Hector's
       // choice: the register keeps its explicit-cost-basis filter, and the
       // vehicle flow guarantees the basis is there.
-      const costCents = dto.assetCostCents ?? (vehicleLabel ? dto.amountCents : undefined);
+      // Cost basis ALWAYS defaults to the entry amount — not just
+      // vehicles. The Asset Register filters on basis-set, and every
+      // portal asset entry is expected to appear there (Hector, Nov 11:
+      // entered an asset without a basis expecting the amount to be it).
+      const costCents = dto.assetCostCents ?? dto.amountCents;
       if (costCents) payload.portal_asset_cost = costCents / 100;
       if (vehicleLabel && !dto.assetPurchaseDate) payload.portal_asset_purchase_date = dto.date;
     }
@@ -377,7 +395,10 @@ export class BooksService {
         id,
         date: (je.posting_date as string) ?? '',
         description: (je.user_remark as string) ?? '',
-        cost: je.portal_asset_cost != null ? Number(je.portal_asset_cost) : Number(je.total_debit ?? 0) || null,
+        // Frappe returns 0 for an unset Currency field — treat 0 as
+        // unset (a basis is always ≥ 0.01 by DTO) and fall back to the
+        // posted JE total.
+        cost: Number(je.portal_asset_cost) > 0 ? Number(je.portal_asset_cost) : Number(je.total_debit ?? 0) || null,
         vehicleName: (je.portal_vehicle_name as string) ?? null,
         purchaseDate: (je.portal_asset_purchase_date as string) || null,
       });
@@ -419,7 +440,7 @@ export class BooksService {
     const isAssetJe =
       je?.company === client.erpCompanyName &&
       Number(je?.portal_entry) === 1 &&
-      (Number(je?.portal_asset_entry) === 1 || je?.portal_asset_cost != null);
+      (Number(je?.portal_asset_entry) === 1 || Number(je?.portal_asset_cost) > 0);
     if (!isAssetJe) {
       throw new NotFoundException('ASSET_NOT_FOUND');
     }

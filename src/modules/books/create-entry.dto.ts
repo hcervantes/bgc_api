@@ -32,9 +32,9 @@ export class CreateEntryDto {
   @IsNotEmpty({ message: 'description is required' })
   description!: string;
 
+  @IsOptional()
   @IsString()
-  @IsNotEmpty({ message: 'accountName is required' })
-  accountName!: string; // full docname, e.g. "Office Supplies - NC"
+  accountName?: string; // full docname; optional ONLY for vehicle assets (auto "Vehicles")
 
   @IsOptional()
   @IsString()

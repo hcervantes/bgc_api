@@ -353,6 +353,30 @@ export class ErpPlatformService {
   }
 
   /**
+   * Phase 4.3 — the tenant's "Vehicles" fixed-asset account, auto-selected
+   * for vehicle asset entries that omit a category (created under Fixed
+   * Assets on first use, same pattern as the mileage account).
+   */
+  async ensureVehicleAssetAccount(companyName: string, abbr: string): Promise<string> {
+    const accountName = 'Vehicles - ' + abbr;
+    try {
+      await this.request('GET', '/api/resource/Account/' + encodeURIComponent(accountName));
+      return accountName;
+    } catch {
+      /* create below */
+    }
+    await this.request('POST', '/api/resource/Account', {
+      account_name: 'Vehicles',
+      company: companyName,
+      parent_account: 'Fixed Assets - ' + abbr,
+      account_type: 'Fixed Asset',
+      is_group: 0,
+    });
+    this.logger.log('Created ERPNext Account "' + accountName + '"');
+    return accountName;
+  }
+
+  /**
    * Phase 4.2 — vehicle tracking setup. MEMOIZED per process (reset on
    * failure): every books read path calls this before its first query,
    * so the roundtrips must not repeat on every request.
