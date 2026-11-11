@@ -35,6 +35,12 @@ export class BooksController {
     return this.service.createCategory(req.tenant as { clientId: string }, user.sub, dto);
   }
 
+  /** Phase 4.3 — the tenant's portal-entered assets (expense tie picker). */
+  @Get('assets')
+  assets(@Req() req: Request) {
+    return this.service.listAssets(req.tenant as { clientId: string });
+  }
+
   /** Phase 4.2 — the tenant's vehicles (odometer tracking). */
   @Get('vehicles')
   vehicles(@Req() req: Request) {

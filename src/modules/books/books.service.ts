@@ -199,9 +199,25 @@ export class BooksService {
         throw new NotFoundException('CUSTOMER_NOT_FOUND');
       }
     }
+    // Phase 4.3 — asset-tab vehicle entry: create-or-reuse the Vehicle by
+    // its plain label so a vehicle is BOTH a fixed-asset purchase and
+    // mileage-trackable, in one step.
+    let vehicleLabel: string | null = null;
+    if (dto.newVehicleLabel) {
+      if (dto.type !== 'asset') {
+        throw new BadRequestException('NEW_VEHICLE_ONLY_FOR_ASSETS');
+      }
+      if (dto.vehicleName) {
+        throw new BadRequestException('VEHICLE_CONFLICT');
+      }
+      const label = dto.newVehicleLabel.trim();
+      if (!NAME_GUARD.test(label)) {
+        throw new BadRequestException('VEHICLE_NAME_INVALID');
+      }
+      vehicleLabel = await this.ensureVehicleByLabel(client, portalUserId, label);
+    }
     // Phase 4.2 — expense/asset entries may reference one of the tenant's
     // Vehicles (fuel, maintenance, repairs...). Foreign vehicle → 404.
-    let vehicleLabel: string | null = null;
     if (dto.vehicleName) {
       if (dto.type === 'income') {
         throw new BadRequestException('VEHICLE_ONLY_FOR_EXPENSE_OR_ASSET');
@@ -218,6 +234,30 @@ export class BooksService {
     }
     if ((dto.assetPurchaseDate || dto.assetCostCents) && dto.type !== 'asset') {
       throw new BadRequestException('ASSET_DETAIL_ONLY_FOR_ASSETS');
+    }
+    // Phase 4.3 — an expense may tie to a previously entered asset. The
+    // referenced JE must be a portal asset entry of THIS tenant — a foreign
+    // JE is 404'd, exactly like a foreign account/vehicle.
+    let tiedAssetVehicle: string | null = null;
+    if (dto.assetRef) {
+      if (dto.type !== 'expense') {
+        throw new BadRequestException('ASSET_REF_ONLY_FOR_EXPENSES');
+      }
+      const je = await this.erp.getResource<{
+        company?: string;
+        portal_entry?: number;
+        portal_asset_entry?: number;
+        portal_asset_cost?: number;
+        portal_vehicle_name?: string;
+      }>('Journal Entry', dto.assetRef);
+      const isAssetJe =
+        je?.company === client.erpCompanyName &&
+        Number(je?.portal_entry) === 1 &&
+        (Number(je?.portal_asset_entry) === 1 || je?.portal_asset_cost != null);
+      if (!isAssetJe) {
+        throw new NotFoundException('ASSET_NOT_FOUND');
+      }
+      tiedAssetVehicle = (je.portal_vehicle_name as string) || null;
     }
 
     await this.ensureBooksMeta();
@@ -255,8 +295,20 @@ export class BooksService {
       payload.portal_vehicle_name = vehicleLabel;
     }
     if (dto.type === 'asset') {
+      payload.portal_asset_entry = 1;
       if (dto.assetPurchaseDate) payload.portal_asset_purchase_date = dto.assetPurchaseDate;
-      if (dto.assetCostCents) payload.portal_asset_cost = dto.assetCostCents / 100;
+      // Vehicles ALWAYS carry cost basis + purchase date so they surface in
+      // the Asset Register (which lists cost-basis entries only) — Hector's
+      // choice: the register keeps its explicit-cost-basis filter, and the
+      // vehicle flow guarantees the basis is there.
+      const costCents = dto.assetCostCents ?? (vehicleLabel ? dto.amountCents : undefined);
+      if (costCents) payload.portal_asset_cost = costCents / 100;
+      if (vehicleLabel && !dto.assetPurchaseDate) payload.portal_asset_purchase_date = dto.date;
+    }
+    if (dto.assetRef) {
+      payload.portal_asset_ref = dto.assetRef;
+      // Tying an expense to a vehicle-asset also keeps the vehicle tag.
+      if (tiedAssetVehicle && !vehicleLabel) payload.portal_vehicle_name = tiedAssetVehicle;
     }
 
     const name = await this.erp.createJournalEntry(payload);
@@ -275,6 +327,108 @@ export class BooksService {
       'Portal entry by ' + portalUserId + ' → JE ' + name + ' (' + dto.type + ', ' + rate.toFixed(2) + ', ' + client.erpCompanyName + ')',
     );
     return { journalEntry: name };
+  }
+
+  // ── Phase 4.3: Assets (the expense tab's "tie to an asset" picker) ─────
+
+  /**
+   * The tenant's portal-entered assets. Includes entries tagged
+   * portal_asset_entry (4.3 flow) AND older asset JEs that carry
+   * portal_asset_cost, so pre-4.3 vehicle entries still show up in the
+   * picker.
+   */
+  async listAssets(tenant: { clientId: string }): Promise<
+    Array<{ id: string; date: string; description: string; cost: number | null; vehicleName: string | null }>
+  > {
+    const client = await this.loadTenantBook(tenant);
+    await this.ensureBooksMeta();
+    const base: unknown[][] = [
+      ['Journal Entry', 'company', '=', client.erpCompanyName],
+      ['Journal Entry', 'portal_entry', '=', 1],
+    ];
+    const fields = ['name', 'posting_date', 'user_remark', 'portal_asset_cost', 'total_debit', 'portal_vehicle_name'];
+    const [tagged, legacy] = await Promise.all([
+      this.erp.listResource<Record<string, unknown>>({
+        doctype: 'Journal Entry',
+        filters: [...base, ['Journal Entry', 'portal_asset_entry', '=', 1]],
+        fields,
+        orderBy: 'posting_date desc',
+        limit: 100,
+      }),
+      this.erp.listResource<Record<string, unknown>>({
+        doctype: 'Journal Entry',
+        filters: [...base, ['Journal Entry', 'portal_asset_cost', 'is', 'set']],
+        fields,
+        orderBy: 'posting_date desc',
+        limit: 100,
+      }),
+    ]);
+    const seen = new Set<string>();
+    const out: Array<{ id: string; date: string; description: string; cost: number | null; vehicleName: string | null }> = [];
+    for (const je of [...tagged, ...legacy]) {
+      const id = je.name as string;
+      if (seen.has(id)) continue;
+      seen.add(id);
+      out.push({
+        id,
+        date: (je.posting_date as string) ?? '',
+        description: (je.user_remark as string) ?? '',
+        cost: je.portal_asset_cost != null ? Number(je.portal_asset_cost) : Number(je.total_debit ?? 0) || null,
+        vehicleName: (je.portal_vehicle_name as string) ?? null,
+      });
+    }
+    return out.sort((a, b) => b.date.localeCompare(a.date));
+  }
+
+  /**
+   * Create-or-reuse a Vehicle by its tenant label (the asset-tab vehicle
+   * field). Same docname namespacing rules as createVehicle: a docname
+   * owned by a foreign tenant gets our abbr suffix instead of failing.
+   * Returns the vehicle LABEL for the JE tag.
+   */
+  private async ensureVehicleByLabel(
+    client: { id: string; erpCompanyName: string },
+    portalUserId: string,
+    label: string,
+  ): Promise<string> {
+    const mine = await this.erp.listResource<{ name: string }>({
+      doctype: 'Vehicle',
+      filters: [
+        ['Vehicle', 'company', '=', client.erpCompanyName],
+        ['Vehicle', 'portal_vehicle_name', '=', label],
+      ],
+      fields: ['name'],
+      limit: 1,
+    });
+    if (mine.length > 0) return label;
+
+    const abbr = this.abbrFor(client.erpCompanyName);
+    let docname = label;
+    const byDocname = await this.erp.getResource<{ company?: string }>('Vehicle', label);
+    if (byDocname) {
+      if (byDocname.company === client.erpCompanyName) {
+        return label; // same docname, same tenant — reuse as is
+      }
+      docname = label + ' (' + abbr + ')';
+      const dupe = await this.erp.getResource<{ company?: string }>('Vehicle', docname);
+      if (dupe) {
+        if (dupe.company === client.erpCompanyName) {
+          return label;
+        }
+        throw new ConflictException('VEHICLE_NAME_CONFLICT');
+      }
+    }
+    const name = await this.erp.createResource('Vehicle', {
+      license_plate: docname,
+      portal_vehicle_name: label,
+      company: client.erpCompanyName,
+      last_odometer: 0,
+    });
+    await this.prisma.auditLog.create({
+      data: { userId: portalUserId, clientId: client.id, action: 'books.vehicle.created', targetId: name },
+    });
+    this.logger.log('Portal vehicle "' + label + '" by ' + portalUserId + ' → Vehicle ' + name);
+    return label;
   }
 
   // ── Phase 4.2: Vehicles (ERPNext's NATIVE Vehicle doctype) ──────────────
@@ -895,6 +1049,18 @@ export class BooksService {
         fieldname: 'portal_asset_cost',
         label: 'Asset Cost Basis',
         fieldtype: 'Currency',
+      },
+      {
+        docname: 'Journal Entry-portal_asset_entry',
+        fieldname: 'portal_asset_entry',
+        label: 'Portal Asset Entry',
+        fieldtype: 'Check',
+      },
+      {
+        docname: 'Journal Entry-portal_asset_ref',
+        fieldname: 'portal_asset_ref',
+        label: 'Tied Asset (Journal Entry)',
+        fieldtype: 'Data',
       },
     ];
     for (const f of fields) {
