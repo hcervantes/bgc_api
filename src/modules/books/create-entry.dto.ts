@@ -32,9 +32,9 @@ export class CreateEntryDto {
   @IsNotEmpty({ message: 'description is required' })
   description!: string;
 
+  @IsOptional()
   @IsString()
-  @IsNotEmpty({ message: 'accountName is required' })
-  accountName!: string; // full docname, e.g. "Office Supplies - NC"
+  accountName?: string; // full docname; optional ONLY for vehicle assets (auto "Vehicles")
 
   @IsOptional()
   @IsString()
@@ -52,4 +52,21 @@ export class CreateEntryDto {
   @IsInt()
   @Min(1)
   assetCostCents?: number; // asset entries only
+
+  /**
+   * Phase 4.3:
+   * - newVehicleLabel (asset only): a plain vehicle NAME — the Vehicle is
+   *   created if it doesn't exist yet (or reused if it does), so entering a
+   *   vehicle as an asset is one step and it is mileage-trackable too.
+   * - assetRef (expense only): the Journal Entry name of a previously
+   *   entered asset to tie this expense to (maintenance, repairs...);
+   *   validated against the tenant, else 404.
+   */
+  @IsOptional()
+  @IsString()
+  newVehicleLabel?: string;
+
+  @IsOptional()
+  @IsString()
+  assetRef?: string;
 }

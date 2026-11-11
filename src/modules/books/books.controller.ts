@@ -1,10 +1,11 @@
-import { Body, Controller, Get, Post, Query, Req, UseGuards } from '@nestjs/common';
+import { Body, Controller, Get, Param, Patch, Post, Query, Req, UseGuards } from '@nestjs/common';
 import { Request } from 'express';
 import { JwtAuthGuard } from '../../common/auth/jwt-auth.guard';
 import { TenantGuard } from '../../common/tenancy/tenant.guard';
 import { CurrentUser } from '../../common/auth/current-user.decorator';
 import { CreateEntryDto } from './create-entry.dto';
 import { CreateOdometerDto } from './odometer.dto';
+import { UpdateAssetDto } from './update-asset.dto';
 import { BooksService } from './books.service';
 
 /** Tenant-scoped bookkeeping entry endpoints (Standard tier self-entry). */
@@ -33,6 +34,24 @@ export class BooksController {
     @CurrentUser() user: { sub: string },
   ) {
     return this.service.createCategory(req.tenant as { clientId: string }, user.sub, dto);
+  }
+
+  /** Phase 4.3 — the tenant's portal-entered assets (asset tab list +
+   *  expense tie picker). */
+  @Get('assets')
+  assets(@Req() req: Request) {
+    return this.service.listAssets(req.tenant as { clientId: string });
+  }
+
+  /** Phase 4.3 — edit a previously entered asset (asset tab list). */
+  @Patch('assets/:jeName')
+  updateAsset(
+    @Req() req: Request,
+    @Param('jeName') jeName: string,
+    @Body() dto: UpdateAssetDto,
+    @CurrentUser() user: { sub: string },
+  ) {
+    return this.service.updateAsset(req.tenant as { clientId: string }, user.sub, jeName, dto);
   }
 
   /** Phase 4.2 — the tenant's vehicles (odometer tracking). */
