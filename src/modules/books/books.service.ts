@@ -131,6 +131,28 @@ export class BooksService {
   private ensureBooksMeta(): Promise<void> {
     this.booksMetaEnsure ??= (async () => {
       await this.erp.ensureVehicleDoctypes();
+      // FRAPPE GOTCHA (bgc-dev, Nov 11): frappe.client.set_value on a
+      // SUBMITTED Journal Entry ALSO runs validate_update_after_submit —
+      // a field without allow_on_submit raises UpdateAfterSubmitError
+      // ("Not allowed to change Asset Cost Basis after submission").
+      // The REST-legal fix is the same Property Setter mechanism used for
+      // the native Vehicle field overrides: grant allow_on_submit on
+      // EXACTLY the four metadata fields the asset-edit flow touches.
+      // GL lines (accounts/amounts/posting_date) stay immutable.
+      for (const field of [
+        'user_remark',
+        'portal_vehicle_name',
+        'portal_asset_cost',
+        'portal_asset_purchase_date',
+      ]) {
+        await this.erp.ensurePropertySetter({
+          docType: 'Journal Entry',
+          fieldName: field,
+          property: 'allow_on_submit',
+          propertyType: 'Check',
+          value: '1',
+        });
+      }
       await this.erp.ensureCustomField({
         docname: 'Customer-portal_company',
         dt: 'Customer',
