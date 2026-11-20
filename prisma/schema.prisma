@@ -113,7 +113,7 @@ model Document {
   mimeType         String
   sizeBytes        Int
   status           DocumentStatus @default(pending_upload)
-  uploadedAt       DateTime       @default(now())
+  uploadedAt       DateTime        @default(now())
   deletedAt        DateTime?
 
   @@index([clientId, taxYear])
@@ -131,7 +131,7 @@ model TaxReturn {
   preparedBy       User          @relation(fields: [preparedByUserId], references: [id])
   finalizedAt      DateTime?
   notes            String?
-  createdAt        DateTime      @default(now())
+  createdAt        DateTime       @default(now())
 
   @@unique([clientId, taxYear, type])
 }
@@ -151,14 +151,14 @@ model ErpNextSite {
   lastHealthAt       DateTime?
   lastHealthOk       Boolean?
   healthError        String?
-  status            String    @default("active")
+  status             String    @default("active")
   createdAt          DateTime  @default(now())
 }
 
 model ProvisioningJob {
   id        String   @id @default(uuid())
   clientId  String
-  client    Client   @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  client    Client    @relation(fields: [clientId], references: [id], onDelete: Cascade)
   state     JobState @default(queued)
   error     String?
   createdAt DateTime @default(now())
@@ -186,7 +186,7 @@ model AuditLog {
 // once (checkouts also emit overlapping subscription + invoice events).
 model StripeEvent {
   id          String   @id @default(uuid())
-  eventId     String   @unique // Stripe's evt_...
+  eventId     String    @unique // Stripe's evt_...
   type        String
   payload     Json
   processedAt DateTime @default(now())
@@ -205,10 +205,10 @@ model StripeSubscription {
   // (resubscribe updates in place), and this enforces it at the DB level.
   clientId             String?   @unique
   client               Client?   @relation(fields: [clientId], references: [id])
-  status               String // active | trialing | past_due | canceled | incomplete
+  status               String    // active | trialing | past_due | canceled | incomplete
   priceId              String?
   currentPeriodEnd     DateTime?
   canceledAt           DateTime?
-  createdAt            DateTime  @default(now())
-  updatedAt            DateTime  @updatedAt
+  createdAt            DateTime   @default(now())
+  updatedAt            DateTime   @updatedAt
 }
