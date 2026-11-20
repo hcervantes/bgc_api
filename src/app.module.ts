@@ -9,6 +9,7 @@ import { DocumentsModule } from './modules/documents/documents.module';
 import { TaxReturnsModule } from './modules/tax-returns/tax-returns.module';
 import { StripeModule } from './modules/stripe/stripe.module';
 import { BooksModule } from './modules/books/books.module';
+import { MailIntakeModule } from './modules/mail-intake/mail-intake.module';
 
 @Module({
   imports: [
@@ -22,6 +23,7 @@ import { BooksModule } from './modules/books/books.module';
     TaxReturnsModule,
     StripeModule,
     BooksModule,
+    MailIntakeModule,
   ],
 })
 export class AppModule {}
