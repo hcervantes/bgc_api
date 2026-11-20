@@ -12,12 +12,28 @@ export class MailWebhookService {
     private readonly config: ConfigService,
   ) {}
 
-  /** Constant-time HMAC-SHA256 comparison over the RAW request body. */
+  /** Constant-time Bearer token comparison — Hostinger Mail webhooks send
+   *  "Authorization: Bearer <token>" (verified Nov 2026); there is no HMAC
+   *  signature header in their current scheme. */
+  async verifyBearerToken(provided: string): Promise<boolean> {
+    const expected = this.config.get<string>('HOSTINGER_WEBHOOK_TOKEN');
+    if (!expected) {
+      // Fail-closed everywhere, dev included.
+      this.logger.error('HOSTINGER_WEBHOOK_TOKEN not configured');
+      return false;
+    }
+    const a = Buffer.from(provided.trim());
+    const b = Buffer.from(expected.trim());
+    if (a.length !== b.length) return false;
+    return timingSafeEqual(a, b);
+  }
+
+  /** Constant-time HMAC-SHA256 comparison over the RAW request body.
+   *  Kept as a fallback in case Hostinger adds signed delivery later. */
   async verifySignature(rawBody: Buffer, signature: string): Promise<boolean> {
     const secret = this.config.get<string>('HOSTINGER_WEBHOOK_SECRET');
     if (!secret) {
-      // Fail-closed everywhere, dev included.
-      this.logger.error('HOSTINGER_WEBHOOK_SECRET not configured');
+      this.logger.warn('HOSTINGER_WEBHOOK_SECRET not configured (HMAC path disabled)');
       return false;
     }
     const expected = createHmac('sha256', secret).update(rawBody).digest();

@@ -19,9 +19,14 @@ import { MAIL_WEBHOOK_SIGNATURE_HEADER } from './mail-webhook.constants';
 // the Mail API, never through the webhook body.
 const MAX_BODY_BYTES = 64 * 1024;
 
-// @Public() + HMAC only — like the Stripe webhook, JWT guards do not apply.
-// (Guard is per-controller in bgc_api; this controller deliberately does NOT
-// add @UseGuards(JwtAuthGuard).)
+// @Public() + Bearer/HMAC auth only — like the Stripe webhook, JWT guards do
+// not apply. (Guard is per-controller in bgc_api; this controller deliberately
+// does NOT add @UseGuards(JwtAuthGuard).)
+//
+// VERIFIED against a real Hostinger delivery (Nov 2026): Hostinger Mail
+// webhooks authenticate with "Authorization: Bearer <token>" (plus
+// x-correlation-id), NOT an HMAC signature header. HMAC support is kept as a
+// fallback so the receiver still works if Hostinger adds signed delivery.
 @Controller('webhooks/mail')
 export class MailWebhookController {
   private readonly logger = new Logger(MailWebhookController.name);
@@ -33,8 +38,12 @@ export class MailWebhookController {
   @HttpCode(HttpStatus.OK)
   async handle(
     @Req() req: RawBodyRequest<Request>,
+    @Headers('authorization') authorization?: string,
     @Headers(MAIL_WEBHOOK_SIGNATURE_HEADER) signature?: string,
   ) {
+    // TEMP DEBUG — remove once envelope field names are confirmed
+    this.logger.log(`Webhook Headers: ${JSON.stringify(req.headers)}`);
+
     const rawBody = req.rawBody;
 
     if (!rawBody || !rawBody.length) {
@@ -44,15 +53,15 @@ export class MailWebhookController {
     if (rawBody.length > MAX_BODY_BYTES) {
       throw new BadRequestException('PAYLOAD_TOO_LARGE');
     }
-    if (!signature) {
-      throw new UnauthorizedException('MISSING_SIGNATURE');
-    }
 
-    // 1. Verify HMAC on the RAW body BEFORE any JSON parsing — a
-    //    re-serialized parsed body produces a different signature.
-    const valid = await this.mailWebhookService.verifySignature(rawBody, signature);
-    if (!valid) {
-      this.logger.warn('Invalid mail webhook signature');
+    // 1. Authenticate BEFORE any JSON parsing. Bearer token (Hostinger's
+    //    actual scheme) or, if present, HMAC signature over the raw body.
+    const bearerMatch = authorization?.match(/^Bearer\s+(.+)$/i)?.[1];
+    const authed =
+      (bearerMatch && (await this.mailWebhookService.verifyBearerToken(bearerMatch))) ||
+      (signature && (await this.mailWebhookService.verifySignature(rawBody, signature)));
+    if (!authed) {
+      this.logger.warn('Mail webhook auth failed (no valid bearer token or signature)');
       throw new UnauthorizedException('INVALID_SIGNATURE');
     }
 
@@ -62,6 +71,9 @@ export class MailWebhookController {
     } catch {
       throw new BadRequestException('INVALID_JSON');
     }
+
+    // TEMP DEBUG — remove once envelope field names are confirmed
+    this.logger.log(`Mail webhook payload: ${JSON.stringify(parsed).slice(0, 2000)}`);
 
     // 2. Insert-first dedupe keyed on eventId (unique). recordEvent throws
     //    on missing id → 500 → Hostinger retries. Handler failures in later
