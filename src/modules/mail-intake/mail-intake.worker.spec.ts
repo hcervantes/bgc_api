@@ -10,8 +10,8 @@ const mkEvent = (over: Partial<MailEvent> = {}): MailEvent =>
     eventId: 'evt_1',
     eventType: 'message.received',
     mailbox: 'documents@mybgctax.com',
-    messageId: 'msg-1',
-    rawPayload: {},
+    messageId: null,
+    rawPayload: { data: { uid: 123, folder: 'INBOX', mailbox: 'documents@mybgctax.com' } },
     status: 'PENDING',
     receivedAt: new Date(),
     processedAt: null,
@@ -31,18 +31,23 @@ const happy = () => ({
     },
   },
   config: { get: jest.fn().mockReturnValue('bgc-tax-documents') },
-  mailApi: { fetchMessage: jest.fn().mockResolvedValue({ raw: Buffer.from('x'), from: 'a@acme.com' }) },
+  mailApi: {
+    resolveMailbox: jest.fn().mockResolvedValue('AC1a2b3c'),
+    fetchMessage: jest.fn().mockResolvedValue({ raw: Buffer.from('x'), from: 'a@acme.com' }),
+  },
   spaces: { putObject: jest.fn().mockResolvedValue(undefined) },
   clamav: { scan: jest.fn().mockResolvedValue({ ok: true }) },
 });
 
 describe('MailIntakeWorkerService.process', () => {
-  it('stages to Spaces and marks PROCESSED on the happy path', async () => {
+  it('resolves the mailbox, fetches by uid, stages to Spaces and marks PROCESSED', async () => {
     const f = happy();
     await mkSvc(f).process(mkEvent());
+    expect(f.mailApi.resolveMailbox).toHaveBeenCalledWith('documents@mybgctax.com');
+    expect(f.mailApi.fetchMessage).toHaveBeenCalledWith('AC1a2b3c', 'INBOX', 123);
     expect(f.spaces.putObject).toHaveBeenCalledWith(
       'bgc-tax-documents',
-      'acme/mail-staging/msg-1.eml',
+      'acme/mail-staging/123.eml',
       expect.any(Buffer),
       'message/rfc822',
     );
@@ -50,6 +55,17 @@ describe('MailIntakeWorkerService.process', () => {
       expect.objectContaining({ data: expect.objectContaining({ status: 'PROCESSED' }) }),
     );
     expect(f.prisma.mailEvent.delete).not.toHaveBeenCalled();
+  });
+
+  it('marks FAILED (keeps row) when the envelope has no usable uid', async () => {
+    const f = happy();
+    const ev = mkEvent({ rawPayload: { data: { mailbox: 'documents@mybgctax.com' } } });
+    await mkSvc(f).process(ev);
+    expect(f.prisma.mailEvent.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ status: 'FAILED', error: expect.stringContaining('NO_MESSAGE_UID') }),
+      }),
+    );
   });
 
   it('marks FAILED (keeps row, 200 to Hostinger) on unknown sender', async () => {

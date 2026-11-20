@@ -1,7 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { PrismaService } from '../../common/prisma/prisma.service';
 import { MailEvent } from '@prisma/client';
+import { PrismaService } from '../../common/prisma/prisma.service';
 import { SpacesService } from '../../common/storage/spaces.service';
 import { HostingerMailClient } from './hostinger-mail.client';
 import { ClamAvService } from './clamav.service';
@@ -14,6 +14,11 @@ import { MAIL_EVENT_TYPES } from './mail-webhook.constants';
 // - TRANSIENT failures (Mail API 5xx, Spaces error, clamd outage): the row
 //   is DELETED and the error rethrown -> webhook 500 -> Hostinger retry
 //   reprocesses from scratch (insert-first dedupe makes this safe).
+//
+// Identifiers come from the webhook envelope via rawPayload. The official
+// OpenAPI spec defines the mailbox/folder/uid model; the exact envelope
+// field names are read tolerantly (data.* or top-level) until verified
+// against one live delivery, then this mapping should be pinned.
 @Injectable()
 export class MailIntakeWorkerService {
   private readonly logger = new Logger(MailIntakeWorkerService.name);
@@ -28,14 +33,21 @@ export class MailIntakeWorkerService {
 
   async process(event: MailEvent): Promise<void> {
     if (event.eventType !== MAIL_EVENT_TYPES.MESSAGE_RECEIVED) return;
-    if (!event.messageId) {
-      await this.fail(event, 'NO_MESSAGE_ID');
+
+    const payload = event.rawPayload as any;
+    const uid = Number(payload?.data?.uid ?? payload?.uid ?? NaN);
+    if (!payload || !Number.isInteger(uid) || uid < 1) {
+      await this.fail(event, 'NO_MESSAGE_UID');
       return;
     }
+    const folder = payload?.data?.folder ?? payload?.folder ?? 'INBOX';
+    const mailbox = (payload?.data?.mailbox ?? payload?.mailbox ?? event.mailbox ?? '') || null;
 
-    let fetched;
+    let resourceId: string;
     try {
-      fetched = await this.mailApi.fetchMessage(event.messageId);
+      if (!mailbox) throw new Error('MAILBOX_UNKNOWN');
+      resourceId = await this.mailApi.resolveMailbox(String(mailbox));
+      var fetched = await this.mailApi.fetchMessage(resourceId, folder, uid);
     } catch (err: any) {
       await this.transient(event, 'MAIL_FETCH: ' + (err?.message ?? String(err)));
       return;
@@ -69,7 +81,7 @@ export class MailIntakeWorkerService {
     }
 
     const bucket = this.config.get<string>('DO_SPACES_BUCKET_DOCS') ?? 'bgc-tax-documents';
-    const key = [client.slug, 'mail-staging', event.messageId + '.eml'].join('/');
+    const key = [client.slug, 'mail-staging', uid + '.eml'].join('/');
     try {
       await this.spaces.putObject(bucket, key, fetched.raw, 'message/rfc822');
     } catch (err: any) {
