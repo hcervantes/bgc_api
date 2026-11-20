@@ -23,7 +23,7 @@ const MAX_BODY_BYTES = 64 * 1024;
 // not apply. (Guard is per-controller in bgc_api; this controller deliberately
 // does NOT add @UseGuards(JwtAuthGuard).)
 //
-// VERIFIED against a real Hostinger delivery (Nov 2026): Hostinger Mail
+// VERIFIED against real Hostinger deliveries (Nov 2026): Hostinger Mail
 // webhooks authenticate with "Authorization: Bearer <token>" (plus
 // x-correlation-id), NOT an HMAC signature header. HMAC support is kept as a
 // fallback so the receiver still works if Hostinger adds signed delivery.
@@ -41,9 +41,6 @@ export class MailWebhookController {
     @Headers('authorization') authorization?: string,
     @Headers(MAIL_WEBHOOK_SIGNATURE_HEADER) signature?: string,
   ) {
-    // TEMP DEBUG — remove once envelope field names are confirmed
-    this.logger.log(`Webhook Headers: ${JSON.stringify(req.headers)}`);
-
     const rawBody = req.rawBody;
 
     if (!rawBody || !rawBody.length) {
@@ -71,9 +68,6 @@ export class MailWebhookController {
     } catch {
       throw new BadRequestException('INVALID_JSON');
     }
-
-    // TEMP DEBUG — remove once envelope field names are confirmed
-    this.logger.log(`Mail webhook payload: ${JSON.stringify(parsed).slice(0, 2000)}`);
 
     // 2. Insert-first dedupe keyed on eventId (unique). recordEvent throws
     //    on missing id → 500 → Hostinger retries. Handler failures in later
