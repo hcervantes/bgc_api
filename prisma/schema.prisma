@@ -78,7 +78,7 @@ model Client {
   status             ClientStatus      @default(active)
   bookkeepingEnabled Boolean           @default(false)
   erpCompanyName     String?
-  createdAt          DateTime          @default(now())
+  createdAt          DateTime           @default(now())
   updatedAt          DateTime          @updatedAt
   users              ClientUser[]
   documents          Document[]
@@ -105,7 +105,7 @@ model Document {
   clientId         String
   client           Client         @relation(fields: [clientId], references: [id], onDelete: Cascade)
   uploadedByUserId String
-  uploader         User           @relation(fields: [uploadedByUserId], references: [id])
+  uploader         User            @relation(fields: [uploadedByUserId], references: [id])
   taxYear          Int
   type             DocumentType
   storageKey       String
@@ -113,7 +113,7 @@ model Document {
   mimeType         String
   sizeBytes        Int
   status           DocumentStatus @default(pending_upload)
-  uploadedAt       DateTime       @default(now())
+  uploadedAt        DateTime       @default(now())
   deletedAt        DateTime?
 
   @@index([clientId, taxYear])
@@ -151,7 +151,7 @@ model ErpNextSite {
   lastHealthAt       DateTime?
   lastHealthOk       Boolean?
   healthError        String?
-  status            String    @default("active")
+  status             String    @default("active")
   createdAt          DateTime  @default(now())
 }
 
@@ -209,6 +209,30 @@ model StripeSubscription {
   priceId              String?
   currentPeriodEnd     DateTime?
   canceledAt           DateTime?
-  createdAt            DateTime  @default(now())
-  updatedAt            DateTime  @updatedAt
+  createdAt            DateTime   @default(now())
+  updatedAt            DateTime   @updatedAt
+}
+
+// ─── Email document intake (Hostinger Agentic Mail webhooks) ───────────
+
+enum MailEventStatus {
+  PENDING
+  PROCESSED
+  FAILED
+}
+
+// Webhook event dedupe for Hostinger Agentic Mail — same insert-first
+// pattern as StripeEvent. The worker (PR #B) flips status to PROCESSED;
+// on handling failure it deletes the row so Hostinger's retry reprocesses.
+model MailEvent {
+  id          String         @id @default(uuid())
+  eventId     String         @unique // Hostinger webhook event id
+  eventType   String // e.g. message.received
+  mailbox     String? // e.g. documents@mybgctax.com
+  messageId   String?
+  rawPayload  Json // full webhook body, kept for replay/debugging
+  status      MailEventStatus @default(PENDING)
+  receivedAt  DateTime        @default(now())
+  processedAt DateTime?
+  error       String? // failure reason (truncated by handler)
 }
