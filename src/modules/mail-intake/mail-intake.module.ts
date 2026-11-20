@@ -1,16 +1,21 @@
 import { Module } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
 import { PrismaModule } from '../../common/prisma/prisma.module';
+import { SpacesModule } from '../../common/storage/spaces.module';
 import { MailWebhookController } from './mail-webhook.controller';
 import { MailWebhookService } from './mail-webhook.service';
+import { MailIntakeWorkerService } from './mail-intake.worker';
+import { HostingerMailClient } from './hostinger-mail.client';
+import { ClamAvService } from './clamav.service';
 
-// PR #A: webhook receiver only (verify, dedupe, record MailEvent).
-// PR #B adds the intake worker (Mail API fetch, Spaces staging, ClamAV)
-// and will import this module to reuse MailWebhookService.
+// PR #A: webhook receiver (verify, dedupe, record MailEvent) — MERGED.
+// PR #B (this branch): inline intake worker — Mail API fetch, exact
+// sender->Client match, clamd INSTREAM scan, DO Spaces staging,
+// PROCESSED/FAILED outcome contract (see mail-intake.worker.ts).
 @Module({
-  imports: [PrismaModule, ConfigModule],
+  imports: [PrismaModule, SpacesModule, ConfigModule],
   controllers: [MailWebhookController],
-  providers: [MailWebhookService],
+  providers: [MailWebhookService, MailIntakeWorkerService, HostingerMailClient, ClamAvService],
   exports: [MailWebhookService],
 })
 export class MailIntakeModule {}

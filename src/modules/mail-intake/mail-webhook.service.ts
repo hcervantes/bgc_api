@@ -1,6 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { createHmac, timingSafeEqual } from 'crypto';
+import { MailEvent } from '@prisma/client';
 import { PrismaService } from '../../common/prisma/prisma.service';
 
 @Injectable()
@@ -48,9 +49,10 @@ export class MailWebhookService {
   }
 
   /** Insert-first dedupe on unique eventId — same pattern as StripeEvent.
-   *  Field names are read tolerantly (id/eventId, type/eventType) until
-   *  verified against a real Hostinger delivery. */
-  async recordEvent(payload: any): Promise<void> {
+   *  Returns the created row, or null when it was a duplicate (the caller
+   *  uses that to skip reprocessing). Field names are read tolerantly
+   *  (id/eventId, type/eventType, nested data). */
+  async recordEvent(payload: any): Promise<MailEvent | null> {
     const eventId = payload?.id ?? payload?.eventId ?? payload?.data?.id;
     const eventType = payload?.type ?? payload?.eventType ?? 'unknown';
     const mailbox = payload?.mailbox ?? payload?.data?.mailbox ?? null;
@@ -65,12 +67,12 @@ export class MailWebhookService {
       where: { eventId },
     });
     if (existing) {
-      this.logger.log(`Duplicate mail webhook ${eventId} ignored`);
-      return;
+      this.logger.log('Duplicate mail webhook ' + eventId + ' ignored');
+      return null;
     }
 
     try {
-      await this.prisma.mailEvent.create({
+      const created = await this.prisma.mailEvent.create({
         data: {
           eventId,
           eventType,
@@ -80,11 +82,12 @@ export class MailWebhookService {
           status: 'PENDING',
         },
       });
-      this.logger.log(`MailEvent recorded: ${eventType} (${eventId})`);
+      this.logger.log('MailEvent recorded: ' + eventType + ' (' + eventId + ')');
+      return created;
     } catch (err: any) {
       if (err?.code === 'P2002') {
-        this.logger.log(`Duplicate mail webhook ${eventId} (race) ignored`);
-        return;
+        this.logger.log('Duplicate mail webhook ' + eventId + ' (race) ignored');
+        return null;
       }
       throw err;
     }

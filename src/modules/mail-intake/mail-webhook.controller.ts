@@ -13,7 +13,8 @@ import {
 import { Request } from 'express';
 import { Public } from '../../common/auth/jwt-auth.guard';
 import { MailWebhookService } from './mail-webhook.service';
-import { MAIL_WEBHOOK_SIGNATURE_HEADER } from './mail-webhook.constants';
+import { MailIntakeWorkerService } from './mail-intake.worker';
+import { MAIL_WEBHOOK_SIGNATURE_HEADER, MAIL_EVENT_TYPES } from './mail-webhook.constants';
 
 // Webhook envelopes are small; attachments are fetched by the worker via
 // the Mail API, never through the webhook body.
@@ -27,11 +28,19 @@ const MAX_BODY_BYTES = 64 * 1024;
 // webhooks authenticate with "Authorization: Bearer <token>" (plus
 // x-correlation-id), NOT an HMAC signature header. HMAC support is kept as a
 // fallback so the receiver still works if Hostinger adds signed delivery.
+//
+// Processing is INLINE (design decision Nov 2026): after the event is
+// recorded, message.received events are fetched, AV-scanned and staged to
+// Spaces before responding. Permanent rejections answer 200 (FAILED row kept);
+// transient failures rethrow so Hostinger retries (row deleted first).
 @Controller('webhooks/mail')
 export class MailWebhookController {
   private readonly logger = new Logger(MailWebhookController.name);
 
-  constructor(private readonly mailWebhookService: MailWebhookService) {}
+  constructor(
+    private readonly mailWebhookService: MailWebhookService,
+    private readonly mailWorker: MailIntakeWorkerService,
+  ) {}
 
   @Public()
   @Post()
@@ -69,10 +78,14 @@ export class MailWebhookController {
       throw new BadRequestException('INVALID_JSON');
     }
 
-    // 2. Insert-first dedupe keyed on eventId (unique). recordEvent throws
-    //    on missing id → 500 → Hostinger retries. Handler failures in later
-    //    PRs delete the row so retries reprocess (Stripe pattern).
-    await this.mailWebhookService.recordEvent(parsed);
+    // 2. Insert-first dedupe keyed on eventId (unique); null = duplicate.
+    const event = await this.mailWebhookService.recordEvent(parsed);
+
+    // 3. Inline processing of NEW message.received events only. Duplicates
+    //    (and their concurrent races) never reprocess.
+    if (event && event.eventType === MAIL_EVENT_TYPES.MESSAGE_RECEIVED) {
+      await this.mailWorker.process(event);
+    }
     return { received: true };
   }
 }
