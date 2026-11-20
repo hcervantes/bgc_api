@@ -8,10 +8,11 @@ import { MailIntakeWorkerService } from './mail-intake.worker';
 import { HostingerMailClient } from './hostinger-mail.client';
 import { ClamAvService } from './clamav.service';
 
-// PR #A: webhook receiver (verify, dedupe, record MailEvent) — MERGED.
-// PR #B (this branch): inline intake worker — Mail API fetch, exact
-// sender->Client match, clamd INSTREAM scan, DO Spaces staging,
-// PROCESSED/FAILED outcome contract (see mail-intake.worker.ts).
+// PR #A: webhook receiver — MERGED (#31).
+// PR #B (this branch): inline intake worker — the live-verified envelope
+// (id/event/timestamp + data{from, mailboxAddress, attachments[].fileUrl})
+// drives everything: exact sender->Client match, per-attachment signed-URL
+// download, clamd scan, Spaces staging under the client's slug.
 @Module({
   imports: [PrismaModule, SpacesModule, ConfigModule],
   controllers: [MailWebhookController],

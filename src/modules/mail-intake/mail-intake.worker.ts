@@ -8,17 +8,16 @@ import { ClamAvService } from './clamav.service';
 import { MAIL_EVENT_TYPES } from './mail-webhook.constants';
 
 // Outcome contract (refines the MailEvent schema note):
-// - PERMANENT rejections (unknown sender, AV infection): row marked FAILED
-//   with a short error, row kept (rawPayload preserved for diagnosis),
-//   webhook still answers 200 — retrying would fail identically.
-// - TRANSIENT failures (Mail API 5xx, Spaces error, clamd outage): the row
-//   is DELETED and the error rethrown -> webhook 500 -> Hostinger retry
-//   reprocesses from scratch (insert-first dedupe makes this safe).
+// - PERMANENT rejections (unknown sender, AV infection, unparseable): row
+//   marked FAILED with a short error, row kept (rawPayload preserved for
+//   diagnosis), webhook still answers 200 — retrying would fail identically.
+// - TRANSIENT failures (signed-URL download, Spaces error, clamd outage):
+//   the row is DELETED and the error rethrown -> webhook 500 -> Hostinger
+//   retry reprocesses from scratch (insert-first dedupe makes this safe).
 //
-// Identifiers come from the webhook envelope via rawPayload. The official
-// OpenAPI spec defines the mailbox/folder/uid model; the exact envelope
-// field names are read tolerantly (data.* or top-level) until verified
-// against one live delivery, then this mapping should be pinned.
+// Attachment bytes come straight from the pre-signed URLs in the envelope
+// (verified live Nov 2026) — no Mail API call, no second token. Bodies are
+// kept in MailEvent.rawPayload; per-attachment Document rows are a later PR.
 @Injectable()
 export class MailIntakeWorkerService {
   private readonly logger = new Logger(MailIntakeWorkerService.name);
@@ -35,27 +34,12 @@ export class MailIntakeWorkerService {
     if (event.eventType !== MAIL_EVENT_TYPES.MESSAGE_RECEIVED) return;
 
     const payload = event.rawPayload as any;
-    const uid = Number(payload?.data?.uid ?? payload?.uid ?? NaN);
-    if (!payload || !Number.isInteger(uid) || uid < 1) {
-      await this.fail(event, 'NO_MESSAGE_UID');
-      return;
-    }
-    const folder = payload?.data?.folder ?? payload?.folder ?? 'INBOX';
-    const mailbox = (payload?.data?.mailbox ?? payload?.mailbox ?? event.mailbox ?? '') || null;
-
-    let resourceId: string;
-    try {
-      if (!mailbox) throw new Error('MAILBOX_UNKNOWN');
-      resourceId = await this.mailApi.resolveMailbox(String(mailbox));
-      var fetched = await this.mailApi.fetchMessage(resourceId, folder, uid);
-    } catch (err: any) {
-      await this.transient(event, 'MAIL_FETCH: ' + (err?.message ?? String(err)));
-      return;
-    }
+    const data = payload?.data ?? {};
+    const attachments = Array.isArray(data.attachments) ? data.attachments : [];
 
     // Exact match on the sender's From address vs Client.email (design
-    // decision, Nov 2026). Case-insensitive on both sides.
-    const from = fetched.from;
+    // decision, Nov 2026). data.from is "Name <addr>" or a bare address.
+    const from = this.extractAddress(String(data.from ?? ''));
     if (!from) {
       await this.fail(event, 'UNPARSEABLE_FROM');
       return;
@@ -69,31 +53,59 @@ export class MailIntakeWorkerService {
       return;
     }
 
-    try {
-      const scan = await this.clamav.scan(fetched.raw);
-      if (!scan.ok) {
-        await this.fail(event, 'AV_INFECTED: ' + (scan.signature ?? 'unknown'));
+    const stagedKeys: string[] = [];
+    for (const att of attachments) {
+      if (!att?.fileUrl || !att?.filename) {
+        await this.fail(event, 'MALFORMED_ATTACHMENT');
         return;
       }
-    } catch (err: any) {
-      await this.transient(event, 'AV_SCAN: ' + (err?.message ?? String(err)));
-      return;
-    }
-
-    const bucket = this.config.get<string>('DO_SPACES_BUCKET_DOCS') ?? 'bgc-tax-documents';
-    const key = [client.slug, 'mail-staging', uid + '.eml'].join('/');
-    try {
-      await this.spaces.putObject(bucket, key, fetched.raw, 'message/rfc822');
-    } catch (err: any) {
-      await this.transient(event, 'SPACES_PUT: ' + (err?.message ?? String(err)));
-      return;
+      let bytes: Buffer;
+      try {
+        bytes = await this.mailApi.downloadSigned(att.fileUrl);
+      } catch (err: any) {
+        await this.transient(event, 'ATTACHMENT_DOWNLOAD: ' + (err?.message ?? String(err)));
+        return;
+      }
+      try {
+        const scan = await this.clamav.scan(bytes);
+        if (!scan.ok) {
+          await this.fail(event, 'AV_INFECTED: ' + (scan.signature ?? 'unknown') + ' (' + att.filename + ')');
+          return;
+        }
+      } catch (err: any) {
+        await this.transient(event, 'AV_SCAN: ' + (err?.message ?? String(err)));
+        return;
+      }
+      const key = [client.slug, 'mail-staging', event.eventId, this.sanitize(att.filename)].join('/');
+      try {
+        const bucket = this.config.get<string>('DO_SPACES_BUCKET_DOCS') ?? 'bgc-tax-documents';
+        await this.spaces.putObject(bucket, key, bytes, att.contentType ?? 'application/octet-stream');
+      } catch (err: any) {
+        await this.transient(event, 'SPACES_PUT: ' + (err?.message ?? String(err)));
+        return;
+      }
+      stagedKeys.push(key);
     }
 
     await this.prisma.mailEvent.update({
       where: { id: event.id },
       data: { status: 'PROCESSED', processedAt: new Date(), error: null },
     });
-    this.logger.log('MailEvent PROCESSED: ' + event.eventId + ' staged at ' + key);
+    this.logger.log(
+      'MailEvent PROCESSED: ' + event.eventId + ' — ' + stagedKeys.length + ' attachment(s) staged' +
+      (stagedKeys.length ? ' (' + stagedKeys.join(', ') + ')' : '') +
+      ' — ' + (attachments.length ? '' : 'no attachments') + from,
+    );
+  }
+
+  /** "Name <addr>" or bare address -> lowercase addr. */
+  private extractAddress(from: string): string | null {
+    const m = from.match(/[\w.+-]+@[\w.-]+/);
+    return m ? m[0].toLowerCase() : null;
+  }
+
+  private sanitize(filename: string): string {
+    return filename.replace(/[^\w.\-]/g, '_').slice(-180) || 'attachment';
   }
 
   /** Permanent: keep the row, record why, webhook stays 200. */

@@ -1,11 +1,16 @@
 #!/usr/bin/env bash
 # Local smoke test for the mail webhook receiver (no Hostinger needed).
-# Real Hostinger deliveries use "Authorization: Bearer <token>" (verified
-# Nov 2026); the HMAC signature path is a fallback only.
+# Envelope shape matches VERIFIED live Hostinger deliveries (Nov 2026):
+#   { id, event, timestamp, data: { from, mailboxAddress, attachments[] } }
+# NOTE: with the intake worker enabled locally, message.received events are
+# processed inline — from addresses that match no Client.email end as a
+# FAILED row (kept). Use a from-address that matches a seeded client for the
+# happy path, or expect FAILED / NO_MATCHING_CLIENT in the console.
 # Usage: HOSTINGER_WEBHOOK_TOKEN=devtoken bash test/mail-webhook.dev.sh
 set -euo pipefail
 TOKEN="${HOSTINGER_WEBHOOK_TOKEN:?set HOSTINGER_WEBHOOK_TOKEN first}"
-BODY='{"id":"evt_test_001","type":"message.received","mailbox":"documents@mybgctax.com","data":{"messageId":"msg-123"}}'
+FROM="${TEST_FROM_ADDRESS:-sender@example.com}"
+BODY="{\"id\":\"evt_test_001\",\"event\":\"message.received\",\"timestamp\":\"2026-11-20T00:00:00Z\",\"data\":{\"from\":\"Test Sender <$FROM>\",\"mailboxAddress\":\"documents@mybgctax.com\",\"messageId\":\"<test-123>\",\"subject\":\"smoke\",\"attachments\":[]}}"
 URL="${API_URL:-http://localhost:4000}/v1/webhooks/mail"
 
 echo "--- valid bearer token (expect 200)"
@@ -29,7 +34,7 @@ curl -s -o /dev/null -w '%{http_code}\n' \
   -d "$BODY" "$URL"
 
 echo "--- missing event id (expect 500 WEBHOOK_MISSING_EVENT_ID)"
-NOID='{"type":"message.received"}'
+NOID='{"event":"message.received","data":{"from":"x@y.z"}}'
 curl -s -o /dev/null -w '%{http_code}\n' \
   -H "Content-Type: application/json" -H "Authorization: Bearer $TOKEN" \
   -d "$NOID" "$URL"

@@ -14,8 +14,8 @@ export class MailWebhookService {
   ) {}
 
   /** Constant-time Bearer token comparison — Hostinger Mail webhooks send
-   *  "Authorization: Bearer <token>" (verified Nov 2026); there is no HMAC
-   *  signature header in their current scheme. */
+   *  "Authorization: Bearer <secret>" (per the official OpenAPI spec and a
+   *  live delivery, Nov 2026); there is no HMAC signature header. */
   async verifyBearerToken(provided: string): Promise<boolean> {
     const expected = this.config.get<string>('HOSTINGER_WEBHOOK_TOKEN');
     if (!expected) {
@@ -50,13 +50,17 @@ export class MailWebhookService {
 
   /** Insert-first dedupe on unique eventId — same pattern as StripeEvent.
    *  Returns the created row, or null when it was a duplicate (the caller
-   *  uses that to skip reprocessing). Field names are read tolerantly
-   *  (id/eventId, type/eventType, nested data). */
+   *  uses that to skip reprocessing).
+   *  Envelope mapping VERIFIED against a live Hostinger delivery (Nov 2026):
+   *  { id, event: "message.received", timestamp,
+   *    data: { from: "Name <addr>", mailboxAddress, messageId,
+   *            subject, plainBody, htmlBody, bodyUrl,
+   *            attachments: [{ fileUrl, filename, sizeBytes, contentType }] } } */
   async recordEvent(payload: any): Promise<MailEvent | null> {
-    const eventId = payload?.id ?? payload?.eventId ?? payload?.data?.id;
-    const eventType = payload?.type ?? payload?.eventType ?? 'unknown';
-    const mailbox = payload?.mailbox ?? payload?.data?.mailbox ?? null;
-    const messageId = payload?.messageId ?? payload?.data?.messageId ?? null;
+    const eventId = payload?.id ?? payload?.data?.eventId ?? payload?.eventId;
+    const eventType = payload?.event ?? payload?.type ?? payload?.eventType ?? 'unknown';
+    const mailbox = payload?.data?.mailboxAddress ?? payload?.mailbox ?? null;
+    const messageId = payload?.data?.messageId ?? payload?.messageId ?? null;
 
     if (!eventId || typeof eventId !== 'string') {
       throw new Error('WEBHOOK_MISSING_EVENT_ID');
