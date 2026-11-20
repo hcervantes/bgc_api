@@ -9,7 +9,11 @@ import { DocumentsModule } from './modules/documents/documents.module';
 import { TaxReturnsModule } from './modules/tax-returns/tax-returns.module';
 import { StripeModule } from './modules/stripe/stripe.module';
 import { BooksModule } from './modules/books/books.module';
-import { MailIntakeModule } from './modules/mail-intake/mail-intake.module';
+
+// Mail intake moved to bgc_portal (PR #141 there) — the portal owns
+// Document rows and the Spaces/ClamAV pipeline, so the Hostinger webhook
+// receiver + worker (formerly this app's mail-intake module, PRs #31/#32)
+// was removed in this PR.
 
 @Module({
   imports: [
@@ -23,7 +27,6 @@ import { MailIntakeModule } from './modules/mail-intake/mail-intake.module';
     TaxReturnsModule,
     StripeModule,
     BooksModule,
-    MailIntakeModule,
   ],
 })
 export class AppModule {}

@@ -78,7 +78,7 @@ model Client {
   status             ClientStatus      @default(active)
   bookkeepingEnabled Boolean           @default(false)
   erpCompanyName     String?
-  createdAt          DateTime           @default(now())
+  createdAt          DateTime          @default(now())
   updatedAt          DateTime          @updatedAt
   users              ClientUser[]
   documents          Document[]
@@ -105,7 +105,7 @@ model Document {
   clientId         String
   client           Client         @relation(fields: [clientId], references: [id], onDelete: Cascade)
   uploadedByUserId String
-  uploader         User            @relation(fields: [uploadedByUserId], references: [id])
+  uploader         User           @relation(fields: [uploadedByUserId], references: [id])
   taxYear          Int
   type             DocumentType
   storageKey       String
@@ -113,7 +113,7 @@ model Document {
   mimeType         String
   sizeBytes        Int
   status           DocumentStatus @default(pending_upload)
-  uploadedAt        DateTime       @default(now())
+  uploadedAt       DateTime        @default(now())
   deletedAt        DateTime?
 
   @@index([clientId, taxYear])
@@ -131,7 +131,7 @@ model TaxReturn {
   preparedBy       User          @relation(fields: [preparedByUserId], references: [id])
   finalizedAt      DateTime?
   notes            String?
-  createdAt        DateTime      @default(now())
+  createdAt        DateTime       @default(now())
 
   @@unique([clientId, taxYear, type])
 }
@@ -158,7 +158,7 @@ model ErpNextSite {
 model ProvisioningJob {
   id        String   @id @default(uuid())
   clientId  String
-  client    Client   @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  client    Client    @relation(fields: [clientId], references: [id], onDelete: Cascade)
   state     JobState @default(queued)
   error     String?
   createdAt DateTime @default(now())
@@ -186,7 +186,7 @@ model AuditLog {
 // once (checkouts also emit overlapping subscription + invoice events).
 model StripeEvent {
   id          String   @id @default(uuid())
-  eventId     String   @unique // Stripe's evt_...
+  eventId     String    @unique // Stripe's evt_...
   type        String
   payload     Json
   processedAt DateTime @default(now())
@@ -205,34 +205,10 @@ model StripeSubscription {
   // (resubscribe updates in place), and this enforces it at the DB level.
   clientId             String?   @unique
   client               Client?   @relation(fields: [clientId], references: [id])
-  status               String // active | trialing | past_due | canceled | incomplete
+  status               String    // active | trialing | past_due | canceled | incomplete
   priceId              String?
   currentPeriodEnd     DateTime?
   canceledAt           DateTime?
   createdAt            DateTime   @default(now())
   updatedAt            DateTime   @updatedAt
-}
-
-// ─── Email document intake (Hostinger Agentic Mail webhooks) ───────────
-
-enum MailEventStatus {
-  PENDING
-  PROCESSED
-  FAILED
-}
-
-// Webhook event dedupe for Hostinger Agentic Mail — same insert-first
-// pattern as StripeEvent. The worker (PR #B) flips status to PROCESSED;
-// on handling failure it deletes the row so Hostinger's retry reprocesses.
-model MailEvent {
-  id          String         @id @default(uuid())
-  eventId     String         @unique // Hostinger webhook event id
-  eventType   String // e.g. message.received
-  mailbox     String? // e.g. documents@mybgctax.com
-  messageId   String?
-  rawPayload  Json // full webhook body, kept for replay/debugging
-  status      MailEventStatus @default(PENDING)
-  receivedAt  DateTime        @default(now())
-  processedAt DateTime?
-  error       String? // failure reason (truncated by handler)
 }
